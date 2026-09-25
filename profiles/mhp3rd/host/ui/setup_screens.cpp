@@ -406,7 +406,10 @@ void SetupScreens::finished(const fs::path &data_dir) {
             begin_panel("##done", "All set", kSubtitle, false);
             begin_content();
             ImGui::Dummy({0.0f, font() * 0.5f});
-            paragraph("The game is ready. Later starts go straight to it.", colors::kGood);
+            paragraph(settings::current().launcher ? "The game is ready. Later starts open on the launcher, one step "
+                                                     "from the game."
+                                                   : "The game is ready. Later starts go straight to it.",
+                      colors::kGood);
             ImGui::Dummy({0.0f, font() * 0.3f});
 #if defined(MHP3RD_ANDROID_APP)
             paragraph("In the game, Back, the menu button at the top of the touch controls, or L3+R3 on a gamepad "

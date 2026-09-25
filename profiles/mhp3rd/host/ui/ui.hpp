@@ -1,5 +1,6 @@
 #pragma once
 
+#include <filesystem>
 #include <memory>
 #include <string>
 
@@ -44,6 +45,15 @@ void open_menu_over_game();
 [[nodiscard]] bool menu_over_game();
 // Once, after the player chose to quit in a menu over the running game.
 [[nodiscard]] bool take_quit_request();
+
+// The launcher, the screen Yakumo opens on before the game starts: the way
+// into the game, its settings, the texture pack, the mods and the saves, over
+// the key art of the disc image, with its menu music. Returns Play at once when
+// it is turned off (ui.launcher, MHP3RD_LAUNCHER), for scripted runs, without a
+// window and right after the setup. Quit also covers "Set up game data again"
+// and "Restart now" chosen in its settings (see install/installer.hpp).
+enum class LauncherChoice { Play, Quit };
+LauncherChoice run_launcher(const std::filesystem::path &disc_image, bool after_setup);
 
 // The setup screens as an installer front end, or null without a window.
 std::unique_ptr<install::InstallerUi> make_setup_screens();

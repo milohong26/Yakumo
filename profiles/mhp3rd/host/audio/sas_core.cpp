@@ -378,4 +378,31 @@ SasCore &sas_core(std::uint32_t handle) {
     return cores[handle];
 }
 
+std::vector<std::int16_t> decode_vag(std::span<const std::uint8_t> bytes) {
+    std::vector<std::int16_t> samples;
+    std::int32_t history1 = 0;
+    std::int32_t history2 = 0;
+    for (std::size_t at = 0; at + 16u <= bytes.size(); at += 16u) {
+        const std::uint8_t *block = bytes.data() + at;
+        const std::uint32_t flags = block[1];
+        if (flags == 7u) break;
+        std::int32_t shift = block[0] & 0x0F;
+        std::int32_t predictor = block[0] >> 4;
+        if (predictor > 4) predictor = 0;
+        if (shift > 12) shift = 9;
+        for (std::int32_t sample = 0; sample < 28; ++sample) {
+            const std::uint8_t byte = block[2 + sample / 2];
+            const std::int32_t nibble = (sample & 1) != 0 ? (byte >> 4) : (byte & 0x0F);
+            std::int32_t value = static_cast<std::int16_t>(nibble << 12) >> shift;
+            value += (history1 * kPredictorA[predictor] + history2 * kPredictorB[predictor]) >> 6;
+            value = clamp16(value);
+            samples.push_back(static_cast<std::int16_t>(value));
+            history2 = history1;
+            history1 = value;
+        }
+        if ((flags & 1u) != 0u) break;
+    }
+    return samples;
+}
+
 } // namespace mhp3rd::audio

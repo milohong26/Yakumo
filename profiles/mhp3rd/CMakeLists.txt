@@ -86,7 +86,9 @@ if(MHP3RD_RENDERER)
             host/gpu/vulkan_renderer.cpp
             host/ui/file_browser.cpp
             host/ui/font_menu.cpp
+            host/ui/game_art.cpp
             host/ui/input_script.cpp
+            host/ui/launcher.cpp
             host/ui/layer.cpp
             host/ui/menu.cpp
             host/ui/mods_screen.cpp

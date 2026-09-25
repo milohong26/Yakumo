@@ -409,6 +409,29 @@ int restart(char **argv) {
     return 1;
 }
 
+namespace {
+constexpr const char *kLauncherSkip = "MHP3RD_LAUNCHER_SKIP_ONCE";
+}
+
+void skip_launcher_on_restart() {
+#if defined(_WIN32)
+    _putenv_s(kLauncherSkip, "1");
+#else
+    setenv(kLauncherSkip, "1", 1);
+#endif
+}
+
+bool take_launcher_skip() {
+    const char *mark = std::getenv(kLauncherSkip);
+    if (mark == nullptr || *mark == '\0') return false;
+#if defined(_WIN32)
+    _putenv_s(kLauncherSkip, "");
+#else
+    unsetenv(kLauncherSkip);
+#endif
+    return true;
+}
+
 void request_setup_on_exit() { setup_on_exit = true; }
 bool setup_requested_on_exit() { return setup_on_exit; }
 

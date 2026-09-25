@@ -108,6 +108,8 @@ struct Settings {
     std::uint32_t adhoc_host_port{27312};   // the built-in server's adhocctl port; the relay is on the next
 
     // Interface
+    bool launcher{true};               // the launcher screen comes up at start, before the game
+    bool launcher_music{true};         // ...playing the disc's menu music
     bool menu_pause{true};             // opening the menu pauses the game
     bool menu_pause_multiplayer{};     // ...also during ad hoc play, where a paused game stops answering its peers
     bool menu_hint_seen{};             // the "Esc / L3+R3 opens the menu" hint was shown

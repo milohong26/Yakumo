@@ -48,6 +48,7 @@
 #include <string>
 #include <utility>
 #include <set>
+#include <sstream>
 #include <thread>
 #include <vector>
 
@@ -5169,7 +5170,10 @@ bool VulkanRenderer::initialize_ui(std::string &error) {
     info.Device = impl.device;
     info.QueueFamily = impl.queue_family;
     info.Queue = impl.queue;
-    info.DescriptorPoolSize = IMGUI_IMPL_VULKAN_MINIMUM_SAMPLED_IMAGE_POOL_SIZE;
+    // One descriptor per texture the interface shows: the font atlas, the
+    // mods' previews and the launcher's pictures. The backend's minimum (8)
+    // runs out, and an image without one crashes the draw.
+    info.DescriptorPoolSize = 128;
     info.MinImageCount = impl.swapchain_min_images;
     // ImGui keeps this many vertex and index buffers and writes the next one
     // for each draw of the interface. Two frames in flight and two presents
@@ -5465,10 +5469,16 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     static const bool trace3d = std::getenv("MHP3RD_TRACE_3D") != nullptr;
     // MHP3RD_TRACE_SPRITES=N: every through-mode sprite of frame N, with the
     // texture state it samples, to find the tiles a 2D screen is built from.
-    static const std::uint64_t trace_sprites_frame = [] {
+    // N-M traces every frame from N to M, to follow an animation.
+    static const std::array<std::uint64_t, 2> trace_sprites_frames = [] {
         const char *text = std::getenv("MHP3RD_TRACE_SPRITES");
-        return text != nullptr ? std::strtoull(text, nullptr, 10) : ~0ull;
+        if (text == nullptr) return std::array<std::uint64_t, 2>{~0ull, 0ull};
+        char *end = nullptr;
+        const std::uint64_t first = std::strtoull(text, &end, 10);
+        const std::uint64_t last = end != nullptr && *end == '-' ? std::strtoull(end + 1, nullptr, 10) : first;
+        return std::array<std::uint64_t, 2>{first, last};
     }();
+    const bool trace_sprites = impl.frames >= trace_sprites_frames[0] && impl.frames <= trace_sprites_frames[1];
 
     // Transformed triangles, strips and fans go straight into the vertex
     // buffer: each decoded vertex once, converted as it is written, and a
@@ -5483,7 +5493,7 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
                         (call.primitive == PrimitiveType::Triangles ||
                          call.primitive == PrimitiveType::TriangleStrip ||
                          call.primitive == PrimitiveType::TriangleFan) &&
-                        !trace && !trace3d && impl.frames != trace_sprites_frame;
+                        !trace && !trace3d && !trace_sprites;
 
     const auto expand = [&]() -> bool {
         switch (call.primitive) {
@@ -5594,7 +5604,18 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     }
 
 
-    if (impl.frames == trace_sprites_frame && call.primitive != PrimitiveType::Sprites) {
+    // The rest of a traced draw's texture state: buffer width, swizzle and
+    // the palette, which a tile of a shared atlas is told apart by.
+    const auto texture_detail = [&call] {
+        const TextureState &t = call.texture;
+        std::ostringstream text;
+        text << " bw=" << t.buffer_width << " swz=" << (t.swizzled ? 1 : 0) << " clut=0x" << std::hex
+             << t.clut_address << std::dec << " cfmt=" << t.clut_format << " cshift=" << t.clut_shift
+             << " cmask=0x" << std::hex << t.clut_mask << std::dec << " coff=" << t.clut_offset
+             << " tfx=" << t.function;
+        return text.str();
+    };
+    if (trace_sprites && call.primitive != PrimitiveType::Sprites) {
         float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f, u0 = 1e9f, v0 = 1e9f, u1 = -1e9f, v1 = -1e9f;
         for (std::size_t i = 0; i < count; ++i) {
             const Vertex &v = vertex_at(i);
@@ -5603,26 +5624,38 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
             u0 = std::min(u0, v.texcoord[0]); u1 = std::max(u1, v.texcoord[0]);
             v0 = std::min(v0, v.texcoord[1]); v1 = std::max(v1, v.texcoord[1]);
         }
-        std::cout << "[sprite] other prim=" << static_cast<int>(call.primitive) << (call.through ? " through" : " transform")
+        std::cout << "[sprite] f=" << impl.frames << " other prim=" << static_cast<int>(call.primitive) << (call.through ? " through" : " transform")
                   << " n=" << count << " pos=(" << x0 << "," << y0 << ")-(" << x1 << "," << y1 << ") uv=(" << u0
                   << "," << v0 << ")-(" << u1 << "," << v1 << ") tex=" << (call.texture.enabled ? 1 : 0) << " 0x"
                   << std::hex << call.texture.address << std::dec << " " << call.texture.width << "x"
                   << call.texture.height << " fmt=" << static_cast<int>(call.texture.format)
-                  << " filter=" << call.texture.min_filter << "/" << call.texture.mag_filter << "\n";
+                  << " filter=" << call.texture.min_filter << "/" << call.texture.mag_filter << texture_detail()
+                  << " color=0x" << std::hex << vertex_at(0).color << std::dec;
+        // A quad's corners with their texture coordinates, which show a
+        // mirrored tile that the bounds above hide.
+        if (count <= 4u) {
+            std::cout << " verts=";
+            for (std::size_t i = 0; i < count; ++i) {
+                const Vertex &v = vertex_at(i);
+                std::cout << (i != 0u ? ";" : "") << v.position[0] << "," << v.position[1] << ":" << v.texcoord[0]
+                          << "," << v.texcoord[1];
+            }
+        }
+        std::cout << "\n";
     }
-    if (call.through && call.primitive == PrimitiveType::Sprites && impl.frames == trace_sprites_frame) {
+    if (call.through && call.primitive == PrimitiveType::Sprites && trace_sprites) {
         for (std::size_t i = 0; i + 1u < count; i += 2u) {
             const Vertex &a = vertex_at(i);
             const Vertex &b = vertex_at(i + 1u);
-            std::cout << "[sprite] pos=(" << a.position[0] << "," << a.position[1] << ")-(" << b.position[0] << ","
+            std::cout << "[sprite] f=" << impl.frames << " pos=(" << a.position[0] << "," << a.position[1] << ")-(" << b.position[0] << ","
                       << b.position[1] << ") uv=(" << a.texcoord[0] << "," << a.texcoord[1] << ")-("
                       << b.texcoord[0] << "," << b.texcoord[1] << ") tex=" << (call.texture.enabled ? 1 : 0)
                       << " 0x" << std::hex << call.texture.address << std::dec << " " << call.texture.width << "x"
                       << call.texture.height << " fmt=" << static_cast<int>(call.texture.format)
                       << " filter=" << call.texture.min_filter << "/" << call.texture.mag_filter
                       << " wrap=" << call.texture.wrap_s << "/" << call.texture.wrap_t
-                      << " blend=" << (call.blend.enabled ? 1 : 0) << " color=0x" << std::hex << b.color << std::dec
-                      << "\n";
+                      << " blend=" << (call.blend.enabled ? 1 : 0) << texture_detail() << " color=0x" << std::hex
+                      << b.color << std::dec << "\n";
         }
     }
 

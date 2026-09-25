@@ -146,6 +146,7 @@ struct GameFiles {
     std::filesystem::path executable;
     std::filesystem::path disc_image; // empty: disc0: is unavailable
     std::filesystem::path memory_stick;
+    bool after_setup{};               // the setup ran in this start, and its last screen said Play
 };
 
 // The layout a game_dir has always had; profiles/mhp3rd/game by default.
@@ -208,6 +209,7 @@ std::optional<GameFiles> locate_game(const Options &options) {
     const std::filesystem::path checkout_game_dir = checkout_game_directory();
     const std::filesystem::path data_dir = install::user_data_directory();
     bool run_setup = options.install;
+    bool set_up = false;
     for (;;) {
         if (!run_setup) {
             if (const auto installed = install::find_installation(data_dir)) {
@@ -217,6 +219,7 @@ std::optional<GameFiles> locate_game(const Options &options) {
                     files.executable = installed->executable;
                     files.disc_image = installed->disc_image;
                     files.memory_stick = installed_memory_stick(data_dir, checkout_game_dir);
+                    files.after_setup = set_up;
                     return files;
                 }
                 const std::string where = install::path_to_utf8(installed->disc_image);
@@ -245,6 +248,7 @@ std::optional<GameFiles> locate_game(const Options &options) {
         }
         if (!install::run_installer(*ui, data_dir)) return std::nullopt;
         run_setup = false;
+        set_up = true;
     }
 }
 
@@ -391,6 +395,15 @@ int main(int argc, char **argv) {
             return 3;
         }
 
+        // The launcher, before any of the game's code runs. Its settings can
+        // also ask to set up again or to restart.
+        if (!mhp3rd::install::run_launcher(paths.disc_image, files->after_setup)) {
+            mhp3rd::adhoc_shutdown();
+            if (mhp3rd::install::setup_requested_on_exit()) return mhp3rd::install::restart_for_setup(argv[0]);
+            if (mhp3rd::install::restart_requested_on_exit()) return mhp3rd::install::restart(argv);
+            return 0;
+        }
+
         runtime.run(elf.runtime_entry(mhp3rd::kLoadBase), configured_max_dispatches());
         std::cout << "Runtime stopped: " << runtime.stop_reason() << "\n";
         // Quit from the menu, a closed window or the game ending: the network
@@ -398,8 +411,11 @@ int main(int argc, char **argv) {
         mhp3rd::adhoc_shutdown();
         // "Set up game data again" in the in-game menu.
         if (mhp3rd::install::setup_requested_on_exit()) return mhp3rd::install::restart_for_setup(argv[0]);
-        // "Restart now" after importing a save.
-        if (mhp3rd::install::restart_requested_on_exit()) return mhp3rd::install::restart(argv);
+        // "Restart now" after importing a save: straight back into the game.
+        if (mhp3rd::install::restart_requested_on_exit()) {
+            mhp3rd::install::skip_launcher_on_restart();
+            return mhp3rd::install::restart(argv);
+        }
         std::cout << mhp3rd::kernel().describe_threads() << "\n";
         runtime.report_hle_histogram();
         return runtime.stop_reason().empty() ? 0 : 4;

@@ -31,11 +31,14 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <array>
 #include <cstdlib>
 #include <iostream>
 #include <memory>
+#include <set>
 #include <vector>
 
 namespace mhp3rd {
@@ -583,6 +586,31 @@ void sas_render(Runtime &rt, std::uint32_t core, std::uint32_t output, bool mix,
     }
 }
 
+// MHP3RD_TRACE_SAS=1: each voice the game starts, with its sample, pitch,
+// volume and envelope. MHP3RD_SAS_DUMP=<folder> also writes each sample once,
+// as the VAG bytes the voice plays, named by its address and size: how to
+// find a sound effect in the game's banks.
+void trace_key_on(const psprecomp::GuestMemory &memory, const audio::SasCore &core, std::uint32_t index) {
+    static const bool trace = std::getenv("MHP3RD_TRACE_SAS") != nullptr;
+    static const char *dump = std::getenv("MHP3RD_SAS_DUMP");
+    if (!trace && dump == nullptr) return;
+    const audio::SasVoice &v = core.voice(index);
+    if (trace)
+        std::cout << "[sas] key on voice " << index << " 0x" << std::hex << v.address << std::dec << " " << v.size
+                  << " bytes" << (v.pcm ? " pcm" : "") << (v.looping ? " looping" : "") << " pitch 0x" << std::hex
+                  << v.pitch << std::dec << " volume " << v.left << "/" << v.right << " adsr 0x" << std::hex
+                  << v.adsr1 << "/0x" << v.adsr2 << std::dec << "\n";
+    if (dump == nullptr || v.size == 0u || v.size > (1u << 20u) || !memory.contains(v.address, v.size)) return;
+    static std::set<std::pair<std::uint32_t, std::uint32_t>> written;
+    if (!written.insert({v.address, v.size}).second) return;
+    std::vector<std::uint8_t> bytes(v.size);
+    memory.copy_out(v.address, bytes);
+    char name[64];
+    std::snprintf(name, sizeof(name), "/%08X_%u.vag", v.address, v.size);
+    std::ofstream(std::string(dump) + name, std::ios::binary)
+        .write(reinterpret_cast<const char *>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+}
+
 void register_audio(HleRegistrar &hle) {
     audio::AudioSink::instance().initialize();
 
@@ -659,8 +687,10 @@ void register_audio(HleRegistrar &hle) {
         audio::sas_core(arg(ctx, 0)).set_simple_adsr(arg(ctx, 1), arg(ctx, 2), arg(ctx, 3));
         kernel().finish(ctx, 0u);
     });
-    hle.add("sceSasCore", "__sceSasSetKeyOn", [](Runtime &, AllegrexContext &ctx) {
-        audio::sas_core(arg(ctx, 0)).key_on(arg(ctx, 1));
+    hle.add("sceSasCore", "__sceSasSetKeyOn", [](Runtime &rt, AllegrexContext &ctx) {
+        audio::SasCore &core = audio::sas_core(arg(ctx, 0));
+        core.key_on(arg(ctx, 1));
+        trace_key_on(rt.memory(), core, arg(ctx, 1));
         kernel().finish(ctx, 0u);
     });
     hle.add("sceSasCore", "__sceSasSetKeyOff", [](Runtime &, AllegrexContext &ctx) {

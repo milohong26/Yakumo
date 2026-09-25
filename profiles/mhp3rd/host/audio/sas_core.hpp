@@ -4,6 +4,8 @@
 
 #include <array>
 #include <cstdint>
+#include <span>
+#include <vector>
 
 namespace mhp3rd::audio {
 
@@ -71,6 +73,7 @@ public:
     // One bit per voice, set while the voice is *not* playing.
     [[nodiscard]] std::uint32_t end_flag() const noexcept;
     [[nodiscard]] std::int32_t envelope_height(std::uint32_t voice) const noexcept;
+    [[nodiscard]] const SasVoice &voice(std::uint32_t voice) const noexcept { return voices_[voice % kSasMaxVoices]; }
 
     // Renders `frames` stereo frames into `output`, overwriting it.
     void render(const psprecomp::GuestMemory &memory, std::int16_t *output, std::size_t frames);
@@ -85,6 +88,11 @@ private:
     std::uint32_t output_mode_{};
     std::array<SasVoice, kSasMaxVoices> voices_{};
 };
+
+// Decodes a VAG sample as a voice plays it once, from its first block to the
+// first end (or loop end) block, into 16-bit mono samples at its own rate: for
+// playing one of the game's sounds outside the game.
+[[nodiscard]] std::vector<std::int16_t> decode_vag(std::span<const std::uint8_t> bytes);
 
 // One core per guest SAS handle. MHP3rd only ever opens one, but the handle is
 // an argument to every call, so it is keyed rather than assumed.

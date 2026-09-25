@@ -322,6 +322,11 @@ const std::vector<Field> &fields() {
              return true;
          },
          [](const Settings &s) { return s.adhoc_mac; }, [](Settings &s, const char *t) { s.adhoc_mac = t; }},
+        {"ui.launcher", "MHP3RD_LAUNCHER",
+         [](Settings &s, const std::string &t) { return parse_bool(t, s.launcher); },
+         [](const Settings &s) { return std::string(s.launcher ? "1" : "0"); },
+         [](Settings &s, const char *t) { s.launcher = variable_flag(t); }},
+        BOOL_FIELD("ui.launcher_music", launcher_music),
         {"ui.menu_pause", "MHP3RD_MENU_PAUSE",
          [](Settings &s, const std::string &t) { return parse_bool(t, s.menu_pause); },
          [](const Settings &s) { return std::string(s.menu_pause ? "1" : "0"); },

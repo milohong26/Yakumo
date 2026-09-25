@@ -280,6 +280,19 @@ OK hands the text to the game as the PSP's keyboard would: UTF-16 in the field's
 
 The menu's text fields (*Hunter name*, *Server*, *Nickname*) open the same keyboard when a gamepad activates them; with a keyboard or the mouse they are edited in place.
 
+## Launcher
+
+Yakumo opens on a launcher before the game starts: a menu made the way the game makes its own GAME MENU, so that it looks and sounds like one of the game's screens. It is built at start from the player's disc image, nothing of the game being in the program:
+
+- **Pictures.** The parchment, the frame around it, the lettering of *MAIN MENU* and the rows' initials, the highlight, the scene beside the menu and the bar at the bottom are the game's own textures, read from its `.TMH0.14` containers in `DATA.BIN` (entries `0FEE` and `0FEA`) and decoded with the renderer's texture decoder, as a mod that changes them has them. They are laid out as the game lays out its GAME MENU, traced with `MHP3RD_TRACE_SPRITES`, and enlarged texel for texel, as the game samples them.
+- **Text.** The rows, the hints and the question are drawn from the game's glyphs as the game draws its text (see [Game text](#game-text)): each glyph in a 20x20 cell, 16 levels, squeezed into the game's advances.
+- **The scene** is animated as in the game: the aptonoth pulls the cart on the spot in four poses of 8 frames at the game's 30 frames a second, while the grass on the hill, the rocks and a cloud behind it pass along arcs and a dragonfly comes and goes.
+- **Sound.** The disc's menu music, `PSP_GAME/SND0.AT3` (what the PSP's home screen plays for the game), plays while it is up, and moving, choosing and backing out play the game's own cursor, decide and cancel sounds, decoded from its menu sound banks (`DATA.BIN` entries `10CA` and `10C4`) at the pitch and volume its SAS voices use.
+
+The rows lead into the game (*Play*, or Start), to the in-game menu's pages (*Settings*; *Textures*, the Texture pack row; *Mods*; *Save data*, the System page's saves), and back out asks *Do you want to quit?* in the game's own box. Up and down or the mouse choose; confirm (○ with the default layout, Enter or a click) opens; L3+R3 opens the settings. The pages work as they do in the in-game menu, except that the Debug page, which works on the running game, is not there, and the System page's first row is *Back to the launcher*. A mod change made there applies at once, even one that changes `DATA.BIN`'s layout: the game has not opened it yet.
+
+The launcher is left out right after the setup, whose last screen already says Play, after *Restart now* in the running game, for scripted runs (`MHP3RD_INPUT_SCRIPT`, `MHP3RD_INPUT_LIVE`, `MHP3RD_AUTO_CONFIRM`), without a window, and when *Open on the launcher* (System) is off. `MHP3RD_LAUNCHER=0` or `1` decides for one run. With another release's data, where those entries hold something else, it shows a plain screen with the same choices.
+
 ## In-game menu
 
 Esc, or L3+R3 on a gamepad, opens Yakumo's menu over the game; the same again, back at its top level or Start closes it. Esc never quits the game: Steam's desktop controller layout on a Steam Deck sends Esc with the B button, so an Esc that arrives together with a gamepad button is ignored.
@@ -339,6 +352,8 @@ The Android app starts from other defaults where a phone differs, with the same 
 | Mods | A row per mod: On, Priority | `[mod <folder>] enabled`, `rank` in `mods.ini` | | Off (default) or on; a higher rank wins where two mods replace the same file |
 | System | Pause the game when the menu opens | `ui.menu_pause` | `MHP3RD_MENU_PAUSE` | On (default) or off: the game keeps running behind the menu |
 | System | Pause during multiplayer | `ui.menu_pause_multiplayer` | `MHP3RD_MENU_PAUSE_MULTIPLAYER` | Off (default): during ad hoc play the game keeps running behind the menu; on: the setting above decides |
+| System | Open on the launcher | `ui.launcher` | `MHP3RD_LAUNCHER` | On (default): start on the [launcher](#launcher); off: straight into the game |
+| System | Launcher music | `ui.launcher_music` | | On (default) or off: the disc's menu music while the launcher is up |
 | System | Add a timestamp to the backup name | `saves.backup_timestamp` | | On (default): each backup from *Back up saves…* is a new folder named by its time; off: plain folder names, replaced after asking |
 | Network | Ad hoc play | `network.adhoc` | `MHP3RD_ADHOC` | Off (default) or on; off, the game reports the wireless switch as off |
 | Network | Server | `network.server` | `MHP3RD_ADHOC_SERVER` | Host name or address of a PSP ad hoc server, optionally `host:port`; empty by default |
@@ -444,7 +459,7 @@ A **file id** is the index of a file in the game's `DATA.BIN`, in four hex digit
 
 **The Mods page** of the menu lists the mods, highest priority first, with whether each is on. A mod's own screen shows its preview, author, type, the release it was made for, what it changes and its description, and has its switch, its place in the list (left and right move it) and, for equipment mods, the file id each file replaces. *Import mod…* copies a mod you downloaded and unpacked into the mods folder, turned off: choose its folder, the one with `mod.ini`, or a folder that holds several mods, in the file browser, or drop the folder on the window. A mod already installed under the same folder name moves to `mods/.backup` first; nothing is deleted. Unpack `.zip`, `.rar` and `.7z` archives before importing. *Open the mods folder*, *Read the folder again* (after adding or removing folders by hand) and *Use mods*, which turns every mod off for a clean comparison, are on the same page.
 
-**When a change applies.** The game reads `DATA.BIN`'s directory once, at start. A change that keeps every file's size as the directory has it applies the next time the game loads each file: usually the next area, menu or piece of equipment shown; files the game loads once at start, such as the menus' textures, need a restart. A change that makes a file larger, or smaller where the directory has its exact size, applies at the next start; the page says so and offers *Restart now*.
+**When a change applies.** The game reads `DATA.BIN`'s directory once, at start. A change that keeps every file's size as the directory has it applies the next time the game loads each file: usually the next area, menu or piece of equipment shown; files the game loads once at start, such as the menus' textures, need a restart. A change that makes a file larger, or smaller where the directory has its exact size, applies at the next start; the page says so and offers *Restart now*. Made in the [launcher](#launcher), before the game has opened `DATA.BIN`, every change applies at once.
 
 The choices are kept in `mods.ini` next to `settings.ini`: `[general] enabled`, and per mod `enabled`, `rank` (higher wins) and the chosen targets of an equipment mod.
 
@@ -858,7 +873,9 @@ Safeguards: CMake finds the generated unit that holds the rotation helper and fa
 | `MHP3RD_TRACE_CAMERA=1` | One line per frame for the camera the game itself set: the second stick's offset from centre, the yaw and pitch read out of the frame's busiest view matrix, the turn since the previous frame, and the camera's world position. Reads the game's own camera, so it tells a stepped turn from a continuous one |
 | `MHP3RD_TRACE_WHITE_TEXTURES=1` | Each texture the decoder cannot decode, once, with its address, size, format, swizzle and palette: those draws are made with a white texture instead, so this is the first thing to check when something draws white |
 | `MHP3RD_TRACE_FB_TEXTURES=1` | Each distinct texture that lies in a framebuffer the renderer drew (with both layouts), each large texture, `sceDmacMemcpy` copies into or out of VRAM, GE block transfers, new render targets, and the GE commands the renderer ignores. Add `PSPRECOMP_TRACE_VRAM_READS=1` to log game code reading VRAM with the CPU, per 64 KiB block and at most once a second |
-| `MHP3RD_TRACE_SPRITES=N` | Every through-mode draw of presented frame N: sprites one by one, other primitives by their bounds, with positions, texture coordinates and texture state |
+| `MHP3RD_TRACE_SPRITES=N` | Every through-mode draw of presented frame N (or of frames N-M): sprites one by one, other primitives by their bounds and, for a quad, its corners with their texture coordinates (a mirrored tile shows there), with positions, texture coordinates and texture state, the palette's address included: how a 2D screen is built, which is how the [launcher](#launcher) copies the GAME MENU |
+| `MHP3RD_TRACE_SAS=1` | Each SAS voice the game starts: its sample's address and size, pitch, volume and envelope |
+| `MHP3RD_SAS_DUMP=<folder>` | Also write each sample once, as the VAG bytes the voice plays, named by address and size: how to find a sound in the game's banks |
 | `MHP3RD_TRACE_MATERIAL=1` | Every distinct value the game writes to the GE material registers |
 | `MHP3RD_TRACE_LIGHTING=1` | Every distinct value the game writes to the GE light and fog registers, and one line per distinct register state a lit draw is made with |
 | `MHP3RD_TRACE_TEXTURE_PACK=1` | Each texture's texture pack key and what the pack does with it (its image, kept as it is, or not listed), each image decoded and uploaded, and once a second the draws that used a replacement and the images and megabytes on the GPU |

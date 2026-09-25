@@ -127,4 +127,13 @@ void request_restart_on_exit();
 // Returns only on failure, with the exit code to use.
 int restart(char **argv);
 
+// The launcher (ui/launcher.cpp), shown before the game starts when there is a
+// window for it. False: the player quit there, or chose to set up again or to
+// restart, which setup_requested_on_exit and restart_requested_on_exit tell.
+bool run_launcher(const std::filesystem::path &disc_image, bool after_setup);
+// A restart from the running game goes back into the game, not the launcher:
+// called before restart(), it leaves a mark for the next start to take.
+void skip_launcher_on_restart();
+[[nodiscard]] bool take_launcher_skip();
+
 } // namespace mhp3rd::install

@@ -11,6 +11,7 @@
 #endif
 #include "ui/input_script.hpp"
 #include "ui/layer.hpp"
+#include "ui/menu.hpp"
 #include "ui/mods_screen.hpp"
 #include "ui/save_screen.hpp"
 #include "ui/texture_pack_screen.hpp"
@@ -108,9 +109,14 @@ std::string file_url(const std::string &path) {
 
 float gain(const settings::Settings &s) { return s.mute ? 0.0f : static_cast<float>(s.volume) / 100.0f; }
 
+// Where the menu is: over the paused game, over the running game, or opened
+// from the launcher before the game has started.
+enum class MenuMode { Paused, Running, Launcher };
+
 class Menu {
 public:
-    explicit Menu(bool paused) : paused_(paused) {}
+    explicit Menu(MenuMode mode, int tab = 0, MenuFocus focus = MenuFocus::None)
+        : mode_(mode), paused_(mode != MenuMode::Running), tab_(tab), focus_(focus) {}
     // One frame; false once the menu closes.
     bool frame();
     [[nodiscard]] bool quit() const noexcept { return quit_; }
@@ -128,8 +134,19 @@ private:
 
     gpu::VulkanRenderer &renderer() { return Layer::get().renderer(); }
 
+    [[nodiscard]] bool launcher() const noexcept { return mode_ == MenuMode::Launcher; }
+
+    // Focuses `row` if the menu opened on it, rather than on the page's first row.
+    void focus_if(MenuFocus row) {
+        if (focus_ != row) return;
+        focus_ = MenuFocus::None;
+        focus_next_row();
+    }
+
+    MenuMode mode_{};
     bool paused_{};  // the game is paused behind the menu, rather than running
     int tab_{};
+    MenuFocus focus_{};  // a row to open on
     bool first_frame_{true};
     bool close_{};
     bool quit_{};
@@ -164,11 +181,12 @@ bool Menu::frame() {
 #endif
     back_ = back || pad_back;
 
-    begin_panel("##menu", "Yakumo", paused_ ? "Paused" : "Running", true);
+    begin_panel("##menu", "Yakumo", launcher() ? "Settings" : paused_ ? "Paused" : "Running", true);
     static const char *const kTabs[] = {"Video", "Audio", "Controls", "Network", "Mods", "System", "Debug"};
 #if defined(MHP3RD_DEBUG_MENU)
     // The developer tools' page, in developer builds run with MHP3RD_DEBUG_MENU=1.
-    const int tab_count = debug::enabled() ? 7 : 6;
+    // It works on the running game, so the launcher leaves it out.
+    const int tab_count = debug::enabled() && !launcher() ? 7 : 6;
 #else
     const int tab_count = 6;
 #endif
@@ -176,7 +194,7 @@ bool Menu::frame() {
     first_frame_ = false;
     begin_content();
     if (switched) {
-        focus_next_row();
+        if (focus_ == MenuFocus::None) focus_next_row();
         ImGui::SetScrollY(0.0f);
     }
     switch (tab_) {
@@ -193,13 +211,13 @@ bool Menu::frame() {
     begin_footer();
     if (tab_ >= 4)
         hints({{Control::Confirm, "Select"}, {Control::Back, "Back"}, {Control::Tabs, "Section"},
-               {Control::Menu, "Resume"}});
+               {Control::Menu, launcher() ? "Done" : "Resume"}});
     else
         hints({{Control::Confirm, "Select"},
                {Control::Change, "Change"},
                {Control::Back, "Back"},
                {Control::Tabs, "Section"},
-               {Control::Menu, "Resume"}});
+               {Control::Menu, launcher() ? "Done" : "Resume"}});
     end_panel();
 
     if (confirm_ != Confirm::None) {
@@ -307,6 +325,7 @@ void Menu::video() {
                 o.note = "Pack folder missing: " +
                          install::path_to_utf8(install::path_from_utf8(status.substr(16)).filename());
         }
+        focus_if(MenuFocus::TexturePack);
         if (choice_row("Texture pack", s.texture_pack ? "On" : "Off", o)) {
             s.texture_pack = !s.texture_pack;
             renderer().set_texture_pack(s.texture_pack);
@@ -1194,7 +1213,9 @@ void Menu::system() {
         data_dir = e.what();
     }
     section("Game");
-    if (button_row("Resume", {false, {}, "Back to the game."})) close_ = true;
+    if (launcher() ? button_row("Back to the launcher", {false, {}, "Close the settings."})
+                   : button_row("Resume", {false, {}, "Back to the game."}))
+        close_ = true;
     settings::Settings &s = settings::current();
     if (toggle_row("Pause the game when the menu opens", s.menu_pause,
                    options_for("ui.menu_pause", "On: the game stops while this menu is open. Off: it keeps running "
@@ -1209,6 +1230,19 @@ void Menu::system() {
                                "game stops answering the other players and can drop a quest. Applies the next time "
                                "the menu opens."))) {
         s.menu_pause_multiplayer = !s.menu_pause_multiplayer;
+        settings::save();
+    }
+    if (toggle_row("Open on the launcher", s.launcher,
+                   options_for("ui.launcher", "On: Yakumo starts on its launcher, with the way into the game, the "
+                                              "settings, texture pack, mods and saves. Off: it goes straight into "
+                                              "the game. Applies at the next start."))) {
+        s.launcher = !s.launcher;
+        settings::save();
+    }
+    if (toggle_row("Launcher music", s.launcher_music,
+                   {!s.launcher, {}, "The menu music from the disc image, as the PSP's home screen plays it, while "
+                                     "the launcher is up. Applies at the next start."})) {
+        s.launcher_music = !s.launcher_music;
         settings::save();
     }
 #if defined(MHP3RD_ANDROID_APP)
@@ -1245,11 +1279,13 @@ void Menu::system() {
     if (button_row("Set up game data again…",
                    {false, {}, "Choose the disc image again, for example after moving it. The game closes first."}))
         confirm_ = Confirm::Setup;
-    if (button_row("Quit game", {false, {}, "Close Yakumo. Progress since your last save is lost."},
-                   colors::kDanger))
+    if (launcher() ? button_row("Quit Yakumo", {false, {}, "Close Yakumo."}, colors::kDanger)
+                   : button_row("Quit game", {false, {}, "Close Yakumo. Progress since your last save is lost."},
+                                colors::kDanger))
         confirm_ = Confirm::Quit;
 
     section("Saves");
+    focus_if(MenuFocus::Saves);
     save_rows();
 
     section("About");
@@ -1279,11 +1315,18 @@ bool Menu::confirm_dialog() {
         }
         confirm_opened_ = true;
         const bool quit = confirm_ == Confirm::Quit;
-        heading(quit ? "Quit the game?" : "Set up game data again?");
-        paragraph(quit ? "Progress since your last save is lost."
-                       : "Yakumo closes the game and opens the setup, where you choose the disc image again. "
-                         "Progress since your last save is lost.",
-                  colors::kTextDim);
+        // Before the game has started there is no progress to lose.
+        if (launcher()) {
+            heading(quit ? "Quit Yakumo?" : "Set up game data again?");
+            if (!quit)
+                paragraph("Yakumo opens the setup, where you choose the disc image again.", colors::kTextDim);
+        } else {
+            heading(quit ? "Quit the game?" : "Set up game data again?");
+            paragraph(quit ? "Progress since your last save is lost."
+                           : "Yakumo closes the game and opens the setup, where you choose the disc image again. "
+                             "Progress since your last save is lost.",
+                      colors::kTextDim);
+        }
         ImGui::Dummy({0.0f, font * 0.6f});
         const float gap = font * 0.6f;
         const float width = (ImGui::GetContentRegionAvail().x - gap) * 0.5f;
@@ -1360,6 +1403,16 @@ void draw_network_overlay() {
             ("Dropped " + std::to_string(d.dropped) + ", timeouts " + std::to_string(d.timeouts)).c_str());
     ImGui::End();
     ImGui::PopStyleVar();
+}
+
+// The menu opened from the launcher, and whether the player quit in it.
+std::optional<Menu> &launcher_menu_state() {
+    static std::optional<Menu> menu;
+    return menu;
+}
+bool &launcher_menu_quit_state() {
+    static bool quit = false;
+    return quit;
 }
 
 // The menu while it is open over the running game, and a quit chosen in it.
@@ -1442,7 +1495,7 @@ void open_menu_over_game() {
     note_menu_opened(false);
     layer.renderer().set_game_input(false);
     layer.set_interactive(true);
-    menu.emplace(false);
+    menu.emplace(MenuMode::Running);
 }
 
 bool menu_over_game() { return menu_over_game_state().has_value(); }
@@ -1457,12 +1510,30 @@ bool menu_requested() {
     return layer.take_menu_toggle() || touched;
 }
 
+void open_launcher_menu(MenuTab tab, MenuFocus focus) {
+    launcher_menu_quit_state() = false;
+    launcher_menu_state().emplace(MenuMode::Launcher, static_cast<int>(tab), focus);
+}
+
+bool launcher_menu_open() { return launcher_menu_state().has_value(); }
+
+bool launcher_menu_frame() {
+    std::optional<Menu> &menu = launcher_menu_state();
+    if (!menu) return false;
+    if (menu->frame()) return true;
+    launcher_menu_quit_state() = menu->quit();
+    menu.reset();
+    return false;
+}
+
+bool take_launcher_menu_quit() { return std::exchange(launcher_menu_quit_state(), false); }
+
 bool run_menu() {
     Layer &layer = Layer::get();
     note_menu_opened(true);
     layer.renderer().set_game_input(false);
     layer.set_interactive(true);
-    Menu menu(true);
+    Menu menu(MenuMode::Paused);
     const bool window_open = layer.run([&] { return menu.frame(); }, true);
     layer.set_interactive(false);
     layer.renderer().set_game_input(true);

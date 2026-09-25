@@ -30,4 +30,14 @@ bool report_problem(const std::string &title, const std::string &message, bool a
     return report_problem_in_dialog(title, message, ask_setup);
 }
 
+bool run_launcher(const std::filesystem::path &disc_image, bool after_setup) {
+#if defined(MHP3RD_HAS_RENDERER)
+    return ui::run_launcher(disc_image, after_setup) == ui::LauncherChoice::Play;
+#else
+    (void)disc_image;
+    (void)after_setup;
+    return true;
+#endif
+}
+
 } // namespace mhp3rd::install
