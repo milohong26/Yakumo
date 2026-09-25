@@ -310,6 +310,20 @@ void Menu::video() {
         renderer().set_sharp_textures(s.sharp_textures);
         settings::save();
     }
+    // Both are read at the start of every frame.
+    if (choice_row("Lighting", s.lighting ? "Remastered" : "Original",
+                   options_for("video.lighting", "Remastered lights hunters, monsters and items per pixel, with soft "
+                                                 "highlights and a rim of sky light. Original is the PSP's lighting, "
+                                                 "per vertex."))) {
+        s.lighting = !s.lighting;
+        settings::save();
+    }
+    if (choice_row("Image effects", s.effects ? "On" : "Off",
+                   options_for("video.effects", "Ambient occlusion, bloom, edge smoothing and a light colour grade "
+                                                "on the 3D scene, under the interface."))) {
+        s.effects = !s.effects;
+        settings::save();
+    }
     {
         RowOptions o = options_for("video.texture_pack",
                                    "Draws an HD texture pack in PPSSPP's format from textures/NPJB40001 in the data "
@@ -446,6 +460,8 @@ void Menu::video() {
         restore("video.aspect", s.aspect, d.aspect);
         restore("video.sharp_screen", s.sharp_screen, d.sharp_screen);
         restore("video.sharp_textures", s.sharp_textures, d.sharp_textures);
+        restore("video.lighting", s.lighting, d.lighting);
+        restore("video.effects", s.effects, d.effects);
         restore("video.texture_pack", s.texture_pack, d.texture_pack);
         restore("video.present_mode", s.present_mode, d.present_mode);
         restore("video.frame_rate", s.frame_rate, d.frame_rate);

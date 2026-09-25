@@ -315,6 +315,8 @@ The Android app starts from other defaults where a phone differs, with the same 
 | Video | Aspect ratio | `video.aspect` | | `original` (the PSP's shape, black bars; the default), `stretch` (stretched to the window) or `fill` (the game's view takes the window's shape). Older versions wrote `video.keep_aspect`, which is still read and written |
 | Video | Scaling filter | `video.sharp_screen` | | Smooth or sharp scaling of the finished picture to the window |
 | Video | Texture filter | `video.sharp_textures` | | Smooth (bilinear) or sharp (nearest) texture sampling |
+| Video | Lighting | `video.lighting` | `MHP3RD_LIGHTING` | Remastered (default): lit models are shaded per pixel, with highlights and rim light. Original: the PSP's per-vertex lighting. See [Lighting and effects](#lighting-and-effects) |
+| Video | Image effects | `video.effects` | `MHP3RD_EFFECTS` | On (default) or off: ambient occlusion, bloom, edge smoothing and a colour grade on the 3D scene. See [Lighting and effects](#lighting-and-effects) |
 | Video | Texture pack | `video.texture_pack` | `MHP3RD_TEXTURE_PACK` | On (default) or off: draw an installed [HD texture pack](#hd-texture-packs) instead of the game's textures. The footer shows how many textures the pack has and how many are on the GPU, or where the pack was looked for |
 | Video | Import texture pack… | `video.texture_pack_folder` | `MHP3RD_TEXTURE_PACK` (a folder) | Empty (default): the pack in `textures/NPJB40001`. A folder: the pack [imported to be used where it is](#importing-a-texture-pack). *Stop using the pack folder* empties it |
 | Video | Vsync | `video.present_mode` | | On (FIFO), or off through mailbox or immediate presentation where the driver offers them |
@@ -372,6 +374,21 @@ The game draws its text with the PSP's system font, which lives in the console's
 A change applies at once: Yakumo makes the game draw every character again the next time it shows it, so text already on screen changes within a frame or two.
 
 How the text is laid out, as traced with `MHP3RD_TRACE_FONT=1`: the game sizes a glyph cell in a texture atlas from the font's maximum glyph size, renders each glyph into a 20×20 buffer and copies that whole buffer into the cell, and draws text as one sprite per cell, half a character wide for Latin letters and full width for Japanese ones. Yakumo reports a 20×20 maximum so cells and buffer match, and fits every glyph inside its cell with a pixel of margin, shifting it and, when it is too large, scaling it down, so no font can spill into a neighbour or lose its edges. The size of the text is therefore fixed by the game; *Weight* is the adjustment that fits within it.
+
+## Lighting and effects
+
+Two settings in the Video section bring the picture closer to a present-day remaster without changing the game's art. Both switch at the next frame; off draws the game exactly as before.
+
+- **Lighting: Remastered** shades lit models (hunters, monsters, items) per pixel instead of per vertex. The game's own directional lights are evaluated at each pixel and wrap a little past the terminator. The ambient light comes brighter from above than below. Past a knee, light rolls off towards white instead of clipping, so a model lit by two of the game's lights keeps its shape instead of going flat. On top of that come what the PSP could not show: a soft normalised Blinn-Phong highlight of each light with a dielectric Fresnel term, and a rim of sky light at grazing angles. The scenery keeps its baked lighting.
+- **Image effects** work on the finished 3D scene, before the interface is drawn over it, so text and menus stay untouched:
+  - ground-truth ambient occlusion (GTAO) from the depth buffer, at half resolution, with a depth-aware denoise and a joint bilateral upsample, fading with the game's fog;
+  - bloom of the brightest light, expanded through an invertible shoulder so pixels no light was added to come out unchanged;
+  - edge anti-aliasing (the scheme of FXAA's quality preset) and contrast-adaptive sharpening elsewhere;
+  - a light grade (contrast on luminance, saturation and vibrance, a warm/cool split, a vignette) and dither.
+
+The effects' images, passes and pipelines are made at start and when the resolution changes, never while playing. At about 4.7 megapixels (×6) they take about 2 ms of an Apple M4's GPU per present, and the game keeps 60 frames a second with frame interpolation. The frames interpolated between the game's own replay them at the same point and reuse the game frame's bloom.
+
+`MHP3RD_EFFECTS_OPTIONS` tunes the strengths as `name=value` pairs separated by commas: `ao` (0.85), `radius` (42, in the game's units), `bloom` (0.12), `threshold`, `knee`, `cap`, `sharpen` (0.2), `aa` (0.5, 0 turns anti-aliasing off), `exposure`, `contrast` (1.06), `saturation` (1.03), `vibrance` (0.15), `vignette` (0.14), `split` (0.6), `shoulder`; for the lighting `highlight` (0.8), `gloss` (24), `rim` (0.45), `wrap` (0.2), `ground` (0.75) and `knee` (0.6, 0 clips as the PSP does). `shadows` turns on experimental screen-space contact shadows towards the key light (off: without temporal filtering they are noisy). `MHP3RD_EFFECTS_DEBUG` shows one buffer instead of the picture: `1` occlusion, `2` contact shadows, `3` distance, `4` bloom. `MHP3RD_TRACE_EFFECTS=1` times each stage on the GPU (see [Diagnostics](#diagnostics)).
 
 ## HD texture packs
 
@@ -671,6 +688,9 @@ The settings a player needs are in the [in-game menu](#in-game-menu). Environmen
 | `MHP3RD_NO_MATERIAL_COLOR` | off | Leave unlit geometry without vertex colours white instead of taking the material colour |
 | `MHP3RD_NO_LIGHTING` | off | Draw lit geometry with the flat white stand-in used before lighting existed, and without fog, to compare a scene with and without them |
 | `MHP3RD_NO_FOG` | off | Turn fog off and keep lighting |
+| `MHP3RD_LIGHTING` | on | `0` lights models per vertex as the PSP does, instead of per pixel with highlights and rim light (menu: Lighting). See [Lighting and effects](#lighting-and-effects) |
+| `MHP3RD_EFFECTS` | on | `0` turns off ambient occlusion, bloom, edge smoothing and the colour grade (menu: Image effects) |
+| `MHP3RD_EFFECTS_OPTIONS` | unset | Strengths of the lighting and effects, `name=value,…`; see [Lighting and effects](#lighting-and-effects) |
 | `MHP3RD_NO_FB_TEXTURES` | off | Decode every texture from guest memory, as before, instead of sampling the render target when the game textures from a framebuffer it drew, and stop writing framebuffers back to guest memory for the shown frame and for GE block transfers |
 | `MHP3RD_TEXTURE_PACK` | unset | `0` turns the [HD texture pack](#hd-texture-packs) off, `1` on; a folder path loads the pack from that folder instead, ahead of an imported one (menu: Texture pack) |
 | `MHP3RD_TEXTURE_PACK_MEMORY` | `1024` | Megabytes of GPU memory for texture pack images; the least recently drawn are dropped above it |
@@ -850,6 +870,9 @@ Safeguards: CMake finds the generated unit that holds the rotation helper and fa
 | `MHP3RD_TRACE_SYNC=1` | Trace semaphores, event flags and mutexes; `MHP3RD_TRACE_SYNC_LIMIT` caps the lines (default 4000) |
 | `MHP3RD_STARVATION_INTERVAL` | Dispatches between virtual-clock advances in code that never calls an import |
 | `MHP3RD_TRACE_GE=1` | Log the first draws of the run with their state |
+| `MHP3RD_TRACE_EFFECTS=1` | An `[effects]` line every 30 presents: the GPU time of the [image effects](#lighting-and-effects) per present, by stage (copies, depth, occlusion, denoise, bloom, composite). Timestamps are written only with this set: on Metal each one splits the work |
+| `MHP3RD_EFFECTS_DEBUG=N` | Show one of the effects' buffers instead of the picture: `1` ambient occlusion, `2` contact shadows, `3` distance, `4` bloom |
+| `MHP3RD_SKIP_MOVIES=1` | Skip the movies as a build without FFmpeg does, for scripted runs that should not wait through the intros |
 | `MHP3RD_CHECK_DIRECT_VERTICES=1` | Expand each transformed draw as well and compare it, vertex by vertex and byte for byte, with what its index list names; prints `[direct-check] N draws compared, M differed` every 300 frames. Slow |
 | `MHP3RD_TRACE_STALLS=1` | Where the render thread waits, once a second and for every slow frame; `MHP3RD_TRACE_STALLS_MS` sets what is slow (default 40). See [Where the render thread waits](#where-the-render-thread-waits) |
 | `MHP3RD_TRACE_INTERPOLATION=1` | With a frame rate above 30, an `[interp]` line a second: the rate running and the one chosen, how many draws matched, the camera's largest turn and the eye's largest move, cuts by reason, presents, the time of a blended present and of recording its draw calls, the draw calls and GPU time of one in-between frame, the plain presents, skipped ones, the latest one, and the delay from a frame's moment to its present. A second line says why presents showed a frame as it is (`at the newest frame`: one per game frame at 60, 90 and 120, as it should be; `at the older`, `not blended (cut)`, `textures dropped`) and which were not made (`display busy`: no swapchain image within 3 ms; `over budget`: presents during the game's code had taken half a frame). It also says when the rate steps down or up, and why. `frames` adds a line per game frame, `presents` a line per present with its blend factor |
