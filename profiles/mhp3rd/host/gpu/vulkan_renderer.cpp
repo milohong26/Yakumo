@@ -2,6 +2,7 @@
 
 #include "frame_interpolation.hpp"
 #include "frame_pacing.hpp"
+#include "post_process.hpp"
 #include "replacement_textures.hpp"
 #include "texture_decode.hpp"
 #include "triangle_indices.hpp"
@@ -69,6 +70,9 @@ constexpr std::uint32_t kSettleFrames = 12u;
 // a fade, a backdrop or a copy of the picture, which spreads with the 3D view
 // instead of keeping the interface's proportions.
 constexpr float kScreenWideDraw = 470.0f;
+// A frame needs this many 3D draws in the displayed framebuffer for its
+// scene to get the lighting effects: fewer is a model shown in a menu.
+constexpr std::uint32_t kEffectsSceneDraws = 16u;
 // Room for one frame's vertices. With frame interpolation a frame cannot reuse
 // its region part way through, so all of it must fit: measured at 16.1 MiB in
 // the busiest areas found (Flooded Forest area 3, Tundra area 2), where 16 MiB
@@ -121,6 +125,7 @@ struct PushConstants {
 static_assert(sizeof(PushConstants) == 128u, "PushConstants must fit the guaranteed push constant size");
 constexpr float kPushFog = 1.0f;
 constexpr float kPushLighting = 2.0f;
+constexpr float kPushPerPixel = 4.0f;  // lit per pixel (settings: video.lighting)
 
 struct GpuVertex {
     float x{}, y{}, z{}, w{1.0f};
@@ -213,14 +218,16 @@ static_assert(sizeof(EnvironmentBlock) == 496u, "EnvironmentBlock must match the
 // one mesh share it, so it is written only when it differs from the last one.
 struct ObjectBlock {
     std::array<float, 16> world{};
-    std::array<float, 4> flags{};             // y: vertex colour, w: material update mask
+    std::array<float, 4> flags{};             // y: vertex colour, z: per-pixel knee, w: material update mask
     std::array<float, 4> emissive{};          // w: specular power
     std::array<float, 4> material_ambient{};
     std::array<float, 4> material_diffuse{};  // w: separate specular
     std::array<float, 4> material_specular{}; // w: reverse normals
+    std::array<float, 4> eye{};               // the camera in world space; w: highlight power
+    std::array<float, 4> enhance{};           // per-pixel lighting: highlight, rim, wrap, ground ambient
 };
 
-static_assert(sizeof(ObjectBlock) == 144u, "ObjectBlock must match the std140 layout in ge.vert");
+static_assert(sizeof(ObjectBlock) == 176u, "ObjectBlock must match the std140 layout in ge.vert");
 
 // GPU vertex decode (MHP3RD_GPU_DECODE): what the raw vertex shader needs to
 // decode and skin a draw's own bytes; the layout matches the Raw block in
@@ -345,6 +352,27 @@ std::array<float, 16> multiply(const std::array<float, 16> &a, const std::array<
         }
     }
     return result;
+}
+
+// Where a view matrix (column major, affine) puts the camera in world space:
+// the point it maps to the origin, R^-1 * -t.
+std::array<float, 3> camera_position(const std::array<float, 16> &view) {
+    const auto m = [&](int row, int column) { return view[static_cast<std::size_t>(column * 4 + row)]; };
+    const float det = m(0, 0) * (m(1, 1) * m(2, 2) - m(1, 2) * m(2, 1)) -
+                      m(0, 1) * (m(1, 0) * m(2, 2) - m(1, 2) * m(2, 0)) +
+                      m(0, 2) * (m(1, 0) * m(2, 1) - m(1, 1) * m(2, 0));
+    if (std::fabs(det) < 1e-12f) return {};
+    const std::array<float, 3> t{-view[12], -view[13], -view[14]};
+    std::array<float, 3> eye{};
+    for (int i = 0; i < 3; ++i) {
+        // Cramer's rule: column i replaced by t.
+        const auto c = [&](int row, int column) { return column == i ? t[static_cast<std::size_t>(row)] : m(row, column); };
+        eye[static_cast<std::size_t>(i)] = (c(0, 0) * (c(1, 1) * c(2, 2) - c(1, 2) * c(2, 1)) -
+                                            c(0, 1) * (c(1, 0) * c(2, 2) - c(1, 2) * c(2, 0)) +
+                                            c(0, 2) * (c(1, 0) * c(2, 1) - c(1, 1) * c(2, 0))) /
+                                           det;
+    }
+    return eye;
 }
 
 bool check(VkResult result, const char *what, std::string &error) {
@@ -1017,6 +1045,31 @@ struct VulkanRenderer::Impl {
         bool copy_valid{};
     };
     std::map<std::uint32_t, Target> targets;
+
+    // Remastered lighting and image effects (post_process.hpp) on the 3D
+    // scene of the displayed framebuffer, applied once a frame where the
+    // interface begins: at the first interface draw after the scene, or at
+    // the flip when none comes. A frame that begins with 2D (a menu drawn
+    // over a model) is left alone.
+    std::unique_ptr<post::Effects> effects_holder = std::make_unique<post::Effects>();
+    post::Effects &fx() { return *effects_holder; }
+    bool effects_ready{};
+    bool effects_frame{};        // on for the frame being drawn
+    bool per_pixel_frame{};      // lit draws lit per pixel in the frame being drawn
+    post::Options effect_options;
+    struct SceneCamera {
+        post::Camera camera;
+        std::uint32_t draws{};
+    };
+    std::array<SceneCamera, 4> scene_cameras{};
+    std::uint32_t scene_draws{};   // perspective draws into a shown framebuffer this frame
+    std::uint32_t scene_target{};  // ...the framebuffer
+    int scene_first{};             // what the frame drew there first: 0 nothing yet, 1 3D, 2 2D
+    bool effects_applied{};
+    void note_scene_draw(const DrawCall &call, const VkViewport &viewport);
+    [[nodiscard]] post::Camera scene_camera() const;
+    void apply_effects(std::uint32_t address);
+    void reset_scene();
     // Write-back of the displayed framebuffer to guest VRAM (write_back_frame):
     // present() scales the target to 480x272 and copies it into a mapped
     // buffer; begin_frame(), after the frame fence, takes the pixels; the next
@@ -1409,7 +1462,12 @@ struct VulkanRenderer::Impl {
         std::uint64_t texture_clock{};        // texture_clock when the frame began
         bool recorded{};                      // recorded for drawing again, in full
         bool valid{};
+        // The effects went in before this group (groups.size(): after the
+        // last), with this camera; kNoEffects: none.
+        std::size_t effects_group{static_cast<std::size_t>(-1)};
+        post::Camera effects_camera{};
         void clear() {
+            effects_group = static_cast<std::size_t>(-1);
             summaries.clear();
             group_of.clear();
             groups.clear();
@@ -2214,6 +2272,12 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
         std::cout << "[render] GPU breadcrumbs " << (b.write != nullptr ? "on" : "unavailable") << "\n";
     }
     impl.load_pipeline_cache();
+    {
+        std::string effects_error;
+        impl.effects_ready = impl.fx().create(impl.device, impl.physical_device, impl.pipeline_cache, effects_error);
+        std::cout << "[render] lighting and effects "
+                  << (impl.effects_ready ? "ready" : "unavailable: " + effects_error) << "\n";
+    }
 
     // Swapchain.
     std::uint32_t format_count = 0u;
@@ -2324,10 +2388,11 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
     lighting_bindings[1].binding = 1u;
     lighting_bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
     lighting_bindings[1].descriptorCount = 1u;
-    lighting_bindings[1].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    lighting_bindings[1].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     lighting_bindings[2] = lighting_bindings[1];
+    lighting_bindings[2].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
     lighting_bindings[2].binding = 2u;
-    lighting_bindings[3] = lighting_bindings[1];
+    lighting_bindings[3] = lighting_bindings[2];
     lighting_bindings[3].binding = 3u;
     lighting_bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     lighting_bindings[4] = lighting_bindings[3];
@@ -3318,7 +3383,114 @@ void VulkanRenderer::Impl::write_capture(VkFence fence) {
     capture_path.clear();
 }
 
+void VulkanRenderer::Impl::reset_scene() {
+    scene_cameras = {};
+    scene_draws = 0u;
+    scene_target = 0u;
+    scene_first = 0;
+    effects_applied = false;
+}
+
+// A 3D draw into a shown framebuffer: the camera it was drawn with, counted
+// so the scene's own camera (most of the draws) wins over a sky dome's or a
+// weapon's, and the key light and fog of the scene.
+void VulkanRenderer::Impl::note_scene_draw(const DrawCall &call, const VkViewport &viewport) {
+    if (scene_first == 0) scene_first = 1;
+    if (scene_draws == 0u) scene_target = call.target.color_address;
+    if (call.target.color_address != scene_target) return;
+    ++scene_draws;
+    const std::array<float, 16> &m = call.projection;
+    SceneCamera *slot = nullptr;
+    for (SceneCamera &candidate : scene_cameras) {
+        const post::Camera &c = candidate.camera;
+        if (candidate.draws != 0u && c.projection[0] == m[0] && c.projection[5] == m[5] &&
+            c.projection[10] == m[10] && c.projection[14] == m[14] && c.viewport_width == viewport.width &&
+            c.viewport_height == viewport.height && c.viewport_x == viewport.x && c.viewport_y == viewport.y &&
+            c.depth_min == viewport.minDepth && c.depth_max == viewport.maxDepth) {
+            slot = &candidate;
+            break;
+        }
+    }
+    if (slot == nullptr) {
+        slot = &*std::min_element(scene_cameras.begin(), scene_cameras.end(),
+                                  [](const SceneCamera &a, const SceneCamera &b) { return a.draws < b.draws; });
+        *slot = SceneCamera{};
+        post::Camera &c = slot->camera;
+        c.valid = true;
+        c.projection = m;
+        c.viewport_x = viewport.x;
+        c.viewport_y = viewport.y;
+        c.viewport_width = viewport.width;
+        c.viewport_height = viewport.height;
+        c.depth_min = viewport.minDepth;
+        c.depth_max = viewport.maxDepth;
+    }
+    ++slot->draws;
+    post::Camera &c = slot->camera;
+    if (call.fog.enabled && !c.fog) {
+        c.fog = true;
+        c.fog_end = call.fog.end;
+        c.fog_scale = call.fog.scale;
+    }
+    if (call.lighting_enabled && c.light_strength == 0.0f) {
+        // The brightest directional light is the key light: the sun.
+        const std::array<float, 16> &v = call.view;
+        for (const LightState &light : call.lighting.lights) {
+            if (!light.enabled || light.type != 0u) continue;
+            const float r = static_cast<float>(light.diffuse & 0xFFu) / 255.0f;
+            const float g = static_cast<float>((light.diffuse >> 8u) & 0xFFu) / 255.0f;
+            const float b = static_cast<float>((light.diffuse >> 16u) & 0xFFu) / 255.0f;
+            const float strength = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+            if (strength <= c.light_strength) continue;
+            const std::array<float, 3> &d = light.position;
+            std::array<float, 3> view_dir{v[0] * d[0] + v[4] * d[1] + v[8] * d[2],
+                                          v[1] * d[0] + v[5] * d[1] + v[9] * d[2],
+                                          v[2] * d[0] + v[6] * d[1] + v[10] * d[2]};
+            const float length = std::sqrt(view_dir[0] * view_dir[0] + view_dir[1] * view_dir[1] +
+                                           view_dir[2] * view_dir[2]);
+            if (length < 1e-6f) continue;
+            c.light = {view_dir[0] / length, view_dir[1] / length, view_dir[2] / length};
+            c.light_strength = strength;
+        }
+    }
+}
+
+post::Camera VulkanRenderer::Impl::scene_camera() const {
+    const auto best = std::max_element(scene_cameras.begin(), scene_cameras.end(),
+                                       [](const SceneCamera &a, const SceneCamera &b) { return a.draws < b.draws; });
+    return best->draws != 0u ? best->camera : post::Camera{};
+}
+
+void VulkanRenderer::Impl::apply_effects(std::uint32_t address) {
+    effects_applied = true;
+    const post::Camera camera = scene_camera();
+    const auto found = targets.find(address);
+    if (!camera.valid || found == targets.end() || !found->second.initialized) return;
+    end_pass();
+    if (!fx().ready() || fx().extent().width != target_extent.width ||
+        fx().extent().height != target_extent.height) {
+        // Frames in flight may still read the images being replaced.
+        if (fx().ready()) vkDeviceWaitIdle(device);
+        std::string error;
+        if (!fx().resize(target_extent, depth_format, error)) {
+            std::cout << "[render] lighting and effects off: " << error << "\n";
+            effects_ready = false;
+            return;
+        }
+    }
+    if (interpolating && recording_frame.recorded) {
+        recording_frame.effects_group = recording_frame.groups.size();
+        recording_frame.effects_camera = camera;
+    }
+    Target &target = found->second;
+    fx().record(command_buffer, target.color, target.color_view, target.depth, depth_aspect(), camera,
+                effect_options);
+    // The picture changed: a copy made for sampling it is out of date.
+    target.draw_serial = ++target_draw_counter;
+}
+
 void VulkanRenderer::Impl::destroy_target(Target &target) {
+    if (target.color_view != VK_NULL_HANDLE) fx().forget(target.color_view);
     for (VkDescriptorSet &descriptor : target.copy_descriptors)
         if (descriptor != VK_NULL_HANDLE) vkFreeDescriptorSets(device, descriptor_pool, 1u, &descriptor);
     vkDestroyImageView(device, target.copy_opaque_view, nullptr);
@@ -3377,9 +3549,10 @@ bool VulkanRenderer::Impl::create_target(Target &target, std::string &error) {
                       target.color,
                       target.color_memory, target.color_view, VK_IMAGE_ASPECT_COLOR_BIT, error))
         return false;
+    // The effects copy the depth of the scene to read it.
     if (!create_image(target_extent.width, target_extent.height, depth_format,
-                      VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, target.depth, target.depth_memory,
-                      target.depth_view, depth_aspect(), error))
+                      VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, target.depth,
+                      target.depth_memory, target.depth_view, depth_aspect(), error))
         return false;
     const std::array<VkImageView, 2> views{target.color_view, target.depth_view};
     VkFramebufferCreateInfo info{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
@@ -4982,6 +5155,10 @@ void VulkanRenderer::Impl::resize_targets(VkExtent2D extent) {
         }
     });
     for (auto &[address, old_target] : old_targets) destroy_target(old_target);
+    if (effects_ready) {
+        std::string error;
+        if (!fx().resize(extent, depth_format, error)) std::cout << "[render] effects: " << error << "\n";
+    }
     // Recorded frames name the old targets and hold viewports of the old size.
     reset_interpolation();
     destroy_interpolation_targets();
@@ -5301,6 +5478,16 @@ void VulkanRenderer::begin_frame() {
     impl.forget_bindings();
     impl.pass_active = false;
     impl.recording = true;
+    impl.reset_scene();
+    impl.effects_frame = impl.effects_ready && settings::current().effects;
+    impl.per_pixel_frame = settings::current().lighting;
+    static const int effects_debug = [] {
+        const char *text = std::getenv("MHP3RD_EFFECTS_DEBUG");
+        return text != nullptr ? std::atoi(text) : 0;
+    }();
+    static const post::Options effects_options = post::options_from_environment(post::Options{});
+    impl.effect_options = effects_options;
+    impl.effect_options.debug = effects_debug;
 }
 
 void VulkanRenderer::upload_frame(std::uint32_t display_address, const std::uint8_t *pixels, std::uint32_t width,
@@ -5440,6 +5627,10 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     static const bool no_lighting = std::getenv("MHP3RD_NO_LIGHTING") != nullptr;
     static const bool no_fog = no_lighting || std::getenv("MHP3RD_NO_FOG") != nullptr;
     const bool lit = call.lighting_enabled && !no_lighting && !call.through && !call.clear_mode;
+    // Lit per pixel: opaque and alpha-blended models, not the additive glows
+    // a highlight or rim would only brighten further.
+    const bool per_pixel = lit && impl.per_pixel_frame &&
+                           (!call.blend.enabled || (call.blend.destination_factor == 3u && call.blend.equation == 0u));
     const bool use_material_color = !no_material_color && !call.has_vertex_color && !call.lighting_enabled;
     const auto to_gpu = [&](const Vertex &vertex) {
         GpuVertex out{};
@@ -5809,6 +6000,13 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
         object.material_ambient = impl.material[1];
         object.material_diffuse = impl.material[2];
         object.material_specular = impl.material[3];
+        if (per_pixel) {
+            const post::Options &options = impl.effect_options;
+            const std::array<float, 3> eye = camera_position(call.view);
+            object.eye = {eye[0], eye[1], eye[2], options.gloss};
+            object.enhance = {options.highlight, options.rim, options.wrap, options.ground};
+            object.flags[2] = options.knee;
+        }
         if (!impl.object_valid || std::memcmp(&object, &impl.last_object, sizeof(object)) != 0) {
             if (!impl.write_uniform(&object, sizeof(object), impl.object_offset)) return;
             impl.last_object = object;
@@ -6029,7 +6227,7 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     PushConstants push{};
     push.transform = multiply(call.projection, view_world);
     push.viewport = {static_cast<float>(kPspWidth), static_cast<float>(kPspHeight), call.through ? 1.0f : 0.0f,
-                     (fogged ? kPushFog : 0.0f) + (lit ? kPushLighting : 0.0f)};
+                     (fogged ? kPushFog : 0.0f) + (lit ? kPushLighting : 0.0f) + (per_pixel ? kPushPerPixel : 0.0f)};
     push.view_z = {view_world[2], view_world[6], view_world[10], view_world[14]};
     push.texture_params = {call.texture.enabled ? 1.0f : 0.0f, static_cast<float>(call.texture.function),
                            static_cast<float>(call.alpha_test.enabled ? call.alpha_test.reference : 0u),
@@ -6067,6 +6265,24 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
                                  (uv[3] * height + static_cast<float>(source.y)) / static_cast<float>(kPspHeight)};
         } else {
             texture_descriptor = impl.texture_descriptor(memory, call);
+        }
+    }
+
+    // The interface begins: the scene under it gets the lighting effects
+    // first. Fades and backdrops as wide as the screen belong to the scene.
+    if (impl.effects_frame && !impl.effects_applied && !call.clear_mode && call.through &&
+        impl.shows(call.target.color_address)) {
+        if (impl.scene_first == 0) {
+            impl.scene_first = 2;
+        } else if (impl.scene_first == 1 && impl.scene_draws >= kEffectsSceneDraws &&
+                   call.target.color_address == impl.scene_target && framebuffer_source.target == nullptr &&
+                   !call.vertices.empty()) {
+            float left = call.vertices.front().position[0], right = left;
+            for (const Vertex &vertex : call.vertices) {
+                left = std::min(left, vertex.position[0]);
+                right = std::max(right, vertex.position[0]);
+            }
+            if (right - left < kScreenWideDraw) impl.apply_effects(call.target.color_address);
         }
     }
 
@@ -6136,6 +6352,9 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
             vk_viewport.maxDepth = std::clamp((vp.z_offset + vp.z_scale) / 65535.0f, 0.0f, 1.0f);
         }
     }
+    if (impl.effects_frame && !call.through && !call.clear_mode && impl.shows(call.target.color_address) &&
+        !interpolation::is_orthographic(call.projection))
+        impl.note_scene_draw(call, vk_viewport);
 
     // Whichever side asked for the constant decides its colour; the source wins
     // when both do, because the destination is then its complement.
@@ -6875,8 +7094,24 @@ void VulkanRenderer::Impl::replay(VkCommandBuffer commands, std::uint32_t slot, 
     static const bool flipbook_guard = std::getenv("MHP3RD_INTERPOLATION_NO_FLIPBOOK_GUARD") == nullptr;
     static const bool motion_guard = std::getenv("MHP3RD_INTERPOLATION_NO_MOTION_GUARD") == nullptr;
 
+    // The lighting effects, where the recorded frame had them.
+    const auto apply_effects_here = [&](bool resume) {
+        vkCmdEndRenderPass(commands);
+        fx().record(commands, target.color, target.color_view, target.depth, depth_aspect(), older.effects_camera,
+                    effect_options, false);
+        if (!resume) return;
+        vkCmdBeginRenderPass(commands, &pass, VK_SUBPASS_CONTENTS_INLINE);
+        perf::count_render_pass();
+        known = false;
+    };
+    const bool replay_effects = effects_ready && fx().ready() && older.effects_camera.valid &&
+                                fx().extent().width == target_extent.width &&
+                                fx().extent().height == target_extent.height;
+
     replay_regions = 0u;
-    for (const ReplayGroup &drawn : older.groups) {
+    for (std::size_t group_index = 0; group_index < older.groups.size(); ++group_index) {
+        const ReplayGroup &drawn = older.groups[group_index];
+        if (replay_effects && group_index == older.effects_group) apply_effects_here(true);
         if (drawn.target != older.displayed) continue;
         // The regions this replay reads, for present_regions.
         if (drawn.vertex_base < static_cast<VkDeviceSize>(kFrameRegions) * kVertexBufferBytes)
@@ -7047,7 +7282,11 @@ void VulkanRenderer::Impl::replay(VkCommandBuffer commands, std::uint32_t slot, 
         }
         ++replayed;
     }
-    vkCmdEndRenderPass(commands);
+    if (replay_effects && older.effects_group == older.groups.size()) {
+        apply_effects_here(false);
+    } else {
+        vkCmdEndRenderPass(commands);
+    }
     interpolation_stats.groups += replayed;
     interpolation_stats.flipbook_steps += flipbook_steps;
     interpolation_stats.followed += followed;
@@ -7229,6 +7468,20 @@ bool VulkanRenderer::present(std::uint32_t display_address,
     if (!impl.ready) return false;
     if (!impl.recording) begin_frame();
     impl.end_pass();
+    // A scene with no interface drawn over it gets its effects here.
+    if (impl.effects_frame && !impl.effects_applied && impl.scene_first == 1 &&
+        impl.scene_draws >= kEffectsSceneDraws && impl.scene_target == display_address)
+        impl.apply_effects(display_address);
+    // MHP3RD_TRACE_EFFECTS=1: what the effects cost, once a second.
+    static const bool trace_effects = std::getenv("MHP3RD_TRACE_EFFECTS") != nullptr;
+    if (trace_effects && impl.frames % 30u == 0u) {
+        std::array<double, 6> stages{};
+        const double ms = impl.fx().take_gpu_ms(&stages);
+        if (ms >= 0.0)
+            std::printf("[effects] %.2f ms of GPU per present (copies %.2f, depth %.2f, occlusion %.2f, denoise %.2f, "
+                        "bloom %.2f, composite %.2f), scene %u draws\n",
+                        ms, stages[0], stages[1], stages[2], stages[3], stages[4], stages[5], impl.scene_draws);
+    }
 
     static const bool trace3d = std::getenv("MHP3RD_TRACE_3D") != nullptr;
     static const bool trace_camera = std::getenv("MHP3RD_TRACE_CAMERA") != nullptr;
@@ -7659,6 +7912,7 @@ void VulkanRenderer::shutdown() {
     impl.destroy_upload_buffer();
     vkDestroyCommandPool(impl.device, impl.command_pool, nullptr);
     vkDestroySwapchainKHR(impl.device, impl.swapchain, nullptr);
+    impl.fx().destroy();
     vkDestroyDevice(impl.device, nullptr);
 #if defined(__ANDROID__)
     SDL_RemoveEventWatch(&Impl::watch_lifecycle, &impl);

@@ -76,12 +76,35 @@ if(MHP3RD_RENDERER)
             DEPENDS ${MHP3RD_SHADER_SOURCES}
                     "${MHP3RD_PROFILE_DIR}/tools/embed_shaders.py"
             COMMENT "Compiling GE shaders to SPIR-V")
-        add_custom_target(mhp3rd_shaders DEPENDS "${MHP3RD_SHADER_INC}")
+        # The post-processing passes (host/gpu/post_process.cpp), apart from
+        # the GE's shaders so only that file includes them.
+        set(MHP3RD_POST_SHADER_INC "${CMAKE_CURRENT_BINARY_DIR}/generated_shaders/post_shaders.inc")
+        set(MHP3RD_POST_SHADER_DIR "${MHP3RD_PROFILE_DIR}/host/gpu/shaders")
+        set(MHP3RD_POST_SHADERS
+            "kPostVertexShader=${MHP3RD_POST_SHADER_DIR}/post.vert"
+            "kPostDepthShader=${MHP3RD_POST_SHADER_DIR}/post_depth.frag"
+            "kPostAoShader=${MHP3RD_POST_SHADER_DIR}/post_ao.frag"
+            "kPostBlurShader=${MHP3RD_POST_SHADER_DIR}/post_blur.frag"
+            "kPostBloomDownShader=${MHP3RD_POST_SHADER_DIR}/post_bloom_down.frag"
+            "kPostBloomUpShader=${MHP3RD_POST_SHADER_DIR}/post_bloom_up.frag"
+            "kPostCompositeShader=${MHP3RD_POST_SHADER_DIR}/post_composite.frag")
+        set(MHP3RD_POST_SHADER_SOURCES ${MHP3RD_POST_SHADERS})
+        list(TRANSFORM MHP3RD_POST_SHADER_SOURCES REPLACE "^[A-Za-z]+=" "")
+        add_custom_command(
+            OUTPUT "${MHP3RD_POST_SHADER_INC}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/generated_shaders"
+            COMMAND python3 "${MHP3RD_PROFILE_DIR}/tools/embed_shaders.py" "${MHP3RD_GLSLANG}"
+                    "${MHP3RD_POST_SHADER_INC}" ${MHP3RD_POST_SHADERS}
+            DEPENDS ${MHP3RD_POST_SHADER_SOURCES} "${MHP3RD_POST_SHADER_DIR}/post_common.glsl"
+                    "${MHP3RD_PROFILE_DIR}/tools/embed_shaders.py"
+            COMMENT "Compiling the post-processing shaders to SPIR-V")
+        add_custom_target(mhp3rd_shaders DEPENDS "${MHP3RD_SHADER_INC}" "${MHP3RD_POST_SHADER_INC}")
         # Dear ImGui (third_party/imgui, unmodified) draws the port's own
         # interface over the game.
         set(MHP3RD_RENDERER_SOURCES
             host/gpu/frame_interpolation.cpp
             host/gpu/frame_pacing.cpp
+            host/gpu/post_process.cpp
             host/gpu/replacement_textures.cpp
             host/gpu/vulkan_renderer.cpp
             host/ui/file_browser.cpp

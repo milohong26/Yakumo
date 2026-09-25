@@ -164,6 +164,13 @@ layout(location = 3) out float frag_fog;
 // (in_normal.z, in_position.w), which through-mode vertices do not use
 // otherwise; see clamp_through_quads() in vulkan_renderer.cpp.
 layout(location = 4) flat out vec4 frag_uv_rect;
+// Per-pixel lighting (push.viewport.w bit 4): what the fragment shader needs
+// to light the pixel itself. frag_color then holds only the light that does
+// not depend on the normal (emissive, point and spot lights).
+layout(location = 5) out vec3 frag_normal;   // world space
+layout(location = 6) out vec3 frag_to_eye;   // world space, towards the camera
+layout(location = 7) out vec3 frag_ambient;  // ambient light times the ambient material
+layout(location = 8) out vec3 frag_diffuse;  // the diffuse material
 
 layout(push_constant) uniform Push {
     mat4 transform;      // WVP, or identity for through vertices
@@ -192,11 +199,13 @@ layout(set = 1, binding = 0) uniform Environment {
 // A lit draw's world matrix and material; the layout matches ObjectBlock.
 layout(set = 1, binding = 1) uniform Object {
     mat4 world;
-    vec4 flags;             // y: vertex has a colour, w: material update mask
+    vec4 flags;             // y: vertex has a colour, z: per-pixel light's knee, w: material update mask
     vec4 emissive;          // rgb; w: specular power
     vec4 material_ambient;  // rgba
     vec4 material_diffuse;  // rgb; w: 1 keeps specular apart
     vec4 material_specular; // rgb; w: reverse normals
+    vec4 eye;               // xyz: the camera in world space; w: highlight power
+    vec4 enhance;           // x: highlight, y: rim, z: wrap, w: ground ambient
 } object;
 
 // The GE's per-vertex lighting, evaluated in world space: emissive, plus the
@@ -205,7 +214,10 @@ layout(set = 1, binding = 1) uniform Object {
 // the spot cone. The material update mask makes the vertex colour stand in for
 // the ambient (bit 0), diffuse (bit 1) and specular (bit 2) material colours;
 // a vertex without a colour keeps the material ones.
-void light_vertex(out vec4 color, out vec3 separate_specular) {
+//
+// `per_pixel`: the directional lights' diffuse terms and every ambient term
+// are left to the fragment shader, which gets the normal and materials.
+void light_vertex(bool per_pixel, out vec4 color, out vec3 separate_specular) {
     int mask = int(object.flags.w + 0.5);
     bool has_color = object.flags.y > 0.5;
     vec4 ambient_material = (has_color && (mask & 1) != 0) ? in_color : object.material_ambient;
@@ -221,7 +233,8 @@ void light_vertex(out vec4 color, out vec3 separate_specular) {
     normal = length_squared > 0.0 ? normal * inversesqrt(length_squared) : vec3(0.0, 0.0, 1.0);
     if (object.material_specular.w > 0.5) normal = -normal;
 
-    vec3 sum = object.emissive.rgb + lighting.ambient.rgb * ambient_material.rgb;
+    vec3 ambient = lighting.ambient.rgb * ambient_material.rgb;
+    vec3 sum = object.emissive.rgb;
     vec3 specular = vec3(0.0);
     for (int i = 0; i < 4; ++i) {
         if (lighting.light_position[i].w < 0.5) continue;
@@ -245,8 +258,8 @@ void light_vertex(out vec4 color, out vec3 separate_specular) {
         float n_dot_l = dot(normal, to_light);
         float diffuse = max(n_dot_l, 0.0);
         if (kind == 2) diffuse = pow(diffuse, power);
-        sum += (lighting.light_ambient[i].rgb * ambient_material.rgb +
-                lighting.light_diffuse[i].rgb * diffuse_material * diffuse) * scale;
+        ambient += lighting.light_ambient[i].rgb * ambient_material.rgb * scale;
+        if (!per_pixel || type != 0) sum += lighting.light_diffuse[i].rgb * diffuse_material * diffuse * scale;
         if (kind == 1 && n_dot_l >= 0.0) {
             // The viewer is taken to look down z, as the GE does.
             vec3 half_vector = normalize(to_light + vec3(0.0, 0.0, 1.0));
@@ -255,6 +268,14 @@ void light_vertex(out vec4 color, out vec3 separate_specular) {
         }
     }
     float alpha = lighting.ambient.a * ambient_material.a;
+    if (per_pixel) {
+        frag_normal = normal;
+        frag_to_eye = object.eye.xyz - world_position;
+        frag_ambient = ambient;
+        frag_diffuse = diffuse_material;
+    } else {
+        sum += ambient;
+    }
     if (object.material_diffuse.w > 0.5) {
         separate_specular = clamp(specular, 0.0, 1.0);
     } else {
@@ -274,6 +295,10 @@ void main() {
     frag_specular = vec3(0.0);
     frag_fog = 1.0;
     frag_uv_rect = vec4(-1e30, -1e30, 1e30, 1e30);
+    frag_normal = vec3(0.0);
+    frag_to_eye = vec3(0.0);
+    frag_ambient = vec3(0.0);
+    frag_diffuse = vec3(0.0);
     if (push.viewport.z > 0.5) {
         vec4 rect = vec4(in_normal.xy, in_normal.z, in_position.w);
         frag_uv_rect = vec4(rect.xy * push.uv_transform.xy + push.uv_transform.zw,
@@ -283,7 +308,7 @@ void main() {
         gl_Position = vec4(ndc, clamp(in_position.z / 65535.0, 0.0, 1.0), 1.0);
     } else {
         int enables = int(push.viewport.w + 0.5);
-        if ((enables & 2) != 0) light_vertex(frag_color, frag_specular);
+        if ((enables & 2) != 0) light_vertex((enables & 4) != 0, frag_color, frag_specular);
         // Fog runs linearly from 1 (clear) to 0 (fogged) with view-space z,
         // which is negative in front of the camera: (z + end) * scale.
         if ((enables & 1) != 0)
