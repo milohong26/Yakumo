@@ -30,20 +30,13 @@ layout(location = 0) out vec4 out_color;
 
 // Contrast-adaptive sharpening (after AMD FidelityFX CAS): a cross of taps,
 // weighted less where the neighbourhood is already contrasty.
-vec4 sharpened(vec2 at, float amount) {
-    vec4 centre = texture(scene, at);
+vec3 sharpened(vec3 centre, vec3 n, vec3 s, vec3 w, vec3 e, float amount) {
     if (amount <= 0.0) return centre;
-    vec2 t = 1.0 / vec2(textureSize(scene, 0));
-    vec3 n = texture(scene, at + vec2(0.0, -t.y)).rgb;
-    vec3 s = texture(scene, at + vec2(0.0, t.y)).rgb;
-    vec3 w = texture(scene, at + vec2(-t.x, 0.0)).rgb;
-    vec3 e = texture(scene, at + vec2(t.x, 0.0)).rgb;
-    vec3 lo = min(centre.rgb, min(min(n, s), min(w, e)));
-    vec3 hi = max(centre.rgb, max(max(n, s), max(w, e)));
+    vec3 lo = min(centre, min(min(n, s), min(w, e)));
+    vec3 hi = max(centre, max(max(n, s), max(w, e)));
     vec3 amp = sqrt(clamp(min(lo, 1.0 - hi) / max(hi, vec3(1e-4)), 0.0, 1.0));
     vec3 weight = -amp / mix(8.0, 5.0, amount);
-    vec3 rgb = (centre.rgb + (n + s + w + e) * weight) / (1.0 + 4.0 * weight);
-    return vec4(clamp(rgb, 0.0, 1.0), centre.a);
+    return clamp((centre + (n + s + w + e) * weight) / (1.0 + 4.0 * weight), 0.0, 1.0);
 }
 
 // Edge anti-aliasing on the 8-bit scene, before the interface is drawn: the
@@ -56,15 +49,27 @@ vec4 sharpened(vec2 at, float amount) {
 float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
 float luma_at(vec2 at) { return luma(textureLod(scene, at, 0.0).rgb); }
 
-bool antialiased(vec2 at, float subpixel, out vec3 color) {
+bool antialiased(vec2 at, float subpixel, float m, float n, float s, float w, float e, out vec3 color);
+
+// The pixel's own colour and its four neighbours, once for both the edge
+// test and the sharpening; the corners and the walk along an edge only where
+// there is one.
+vec3 filtered(vec2 at, float subpixel, float sharpen) {
+    ivec2 texel = ivec2(gl_FragCoord.xy);
+    ivec2 limit = textureSize(scene, 0) - 1;
+    vec3 c_m = texelFetch(scene, texel, 0).rgb;
+    vec3 c_n = texelFetch(scene, clamp(texel + ivec2(0, -1), ivec2(0), limit), 0).rgb;
+    vec3 c_s = texelFetch(scene, clamp(texel + ivec2(0, 1), ivec2(0), limit), 0).rgb;
+    vec3 c_w = texelFetch(scene, clamp(texel + ivec2(-1, 0), ivec2(0), limit), 0).rgb;
+    vec3 c_e = texelFetch(scene, clamp(texel + ivec2(1, 0), ivec2(0), limit), 0).rgb;
+    vec3 color;
+    if (subpixel > 0.0 && antialiased(at, subpixel, luma(c_m), luma(c_n), luma(c_s), luma(c_w), luma(c_e), color))
+        return color;
+    return sharpened(c_m, c_n, c_s, c_w, c_e, sharpen);
+}
+
+bool antialiased(vec2 at, float subpixel, float m, float n, float s, float w, float e, out vec3 color) {
     vec2 t = 1.0 / vec2(textureSize(scene, 0));
-    vec3 centre = textureLod(scene, at, 0.0).rgb;
-    color = centre;
-    float m = luma(centre);
-    float n = luma(textureLodOffset(scene, at, 0.0, ivec2(0, -1)).rgb);
-    float s = luma(textureLodOffset(scene, at, 0.0, ivec2(0, 1)).rgb);
-    float w = luma(textureLodOffset(scene, at, 0.0, ivec2(-1, 0)).rgb);
-    float e = luma(textureLodOffset(scene, at, 0.0, ivec2(1, 0)).rgb);
     float lo = min(m, min(min(n, s), min(w, e)));
     float hi = max(m, max(max(n, s), max(w, e)));
     float range = hi - lo;
@@ -134,28 +139,23 @@ bool antialiased(vec2 at, float subpixel, out vec3 color) {
 // how close their depth is to this pixel's (a joint bilateral upsample).
 vec2 upsampled_visibility(float dist) {
     vec2 at = gl_FragCoord.xy * 0.5 - 0.5;
-    ivec2 base = ivec2(floor(at));
-    vec2 f = at - vec2(base);
-    ivec2 limit = textureSize(distances, 0) - 1;
-    vec2 sum = vec2(0.0);
-    float total = 0.0;
-    vec2 closest = vec2(1.0);
-    float closest_delta = 1e30;
-    for (int i = 0; i < 4; ++i) {
-        ivec2 o = ivec2(i & 1, i >> 1);
-        ivec2 texel = clamp(base + o, ivec2(0), limit);
-        float bilinear = (o.x == 1 ? f.x : 1.0 - f.x) * (o.y == 1 ? f.y : 1.0 - f.y);
-        float delta = abs(texelFetch(distances, texel, 0).r - dist);
-        vec2 v = texelFetch(visibility, texel, 0).rg;
-        float w = bilinear * exp(-delta / max(0.05 * dist, 1e-3));
-        sum += v * w;
-        total += w;
-        if (delta < closest_delta) {
-            closest_delta = delta;
-            closest = v;
-        }
-    }
-    return total > 1e-4 ? sum / total : closest;
+    vec2 base = floor(at);
+    vec2 f = at - base;
+    // The four texels around the point, in textureGather's order: (0,1),
+    // (1,1), (1,0), (0,0).
+    vec2 corner = (base + 1.0) / vec2(textureSize(distances, 0));
+    vec4 d = textureGather(distances, corner, 0);
+    vec4 ambient = textureGather(visibility, corner, 0);
+    vec4 light = textureGather(visibility, corner, 1);
+    vec4 bilinear = vec4((1.0 - f.x) * f.y, f.x * f.y, f.x * (1.0 - f.y), (1.0 - f.x) * (1.0 - f.y));
+    vec4 delta = abs(d - dist);
+    vec4 w = bilinear * exp(-delta / max(0.05 * dist, 1e-3));
+    float total = dot(w, vec4(1.0));
+    if (total > 1e-4) return vec2(dot(ambient, w), dot(light, w)) / total;
+    // No neighbour at this depth: the closest one.
+    float nearest = min(min(delta.x, delta.y), min(delta.z, delta.w));
+    int i = nearest == delta.x ? 0 : nearest == delta.y ? 1 : nearest == delta.z ? 2 : 3;
+    return vec2(ambient[i], light[i]);
 }
 
 // GTAO's fit of occlusion with interreflections: bright surfaces lose less.
@@ -194,9 +194,7 @@ vec3 grade(vec3 color) {
 
 void main() {
     // An edge is smoothed and left unsharpened; the rest is sharpened.
-    vec3 smoothed;
-    vec4 base = (p.c.w > 0.0 && antialiased(uv, p.c.w, smoothed)) ? vec4(smoothed, texture(scene, uv).a)
-                                                                   : sharpened(uv, p.a.w);
+    vec4 base = vec4(filtered(uv, p.c.w, p.a.w), texelFetch(scene, ivec2(gl_FragCoord.xy), 0).a);
     vec3 color = to_linear(base.rgb);
     float dist = view_distance(texelFetch(depth_buffer, ivec2(gl_FragCoord.xy), 0).r);
     bool sky = dist >= kSky * 0.5;
