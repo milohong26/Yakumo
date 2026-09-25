@@ -154,6 +154,7 @@ std::int64_t open_file(const std::string &full_path, std::uint32_t flags) {
             file.disc_offset < data_bin->offset + data_bin->size) {
             file.archive = true;
             file.archive_offset = file.disc_offset - data_bin->offset;
+            mods::note_archive_opened();
             if (file.archive_offset == 0u && file.size == data_bin->size) file.size = mods::data_bin_size();
         }
     } else if (split.device == Device::MemoryStick) {
@@ -355,6 +356,7 @@ void register_io(HleRegistrar &hle, const std::filesystem::path &disc_image, con
                 const auto data_bin = mods::data_bin_on_disc();
                 const bool is_data_bin = data_bin && !entry->directory &&
                                          static_cast<std::uint64_t>(entry->lba) * IsoImage::kSectorSize == data_bin->offset;
+                if (is_data_bin) mods::note_archive_opened();
                 write_stat(rt.memory(), arg(ctx, 1), entry->directory,
                            is_data_bin ? mods::data_bin_size() : entry->size, entry->lba);
                 result = 0u;

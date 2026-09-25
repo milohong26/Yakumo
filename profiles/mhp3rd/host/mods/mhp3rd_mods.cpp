@@ -54,6 +54,7 @@ struct State {
     std::shared_ptr<const Layout> layout;  // null: the disc's own archive
     bool serving{};
     bool switched_live{};                  // a change was applied while running
+    bool seen{};                           // the game has opened the archive: it knows its size and directory
     std::optional<Resolution> waiting;     // a switch waiting for a file's load to end
     std::optional<FileId> partial;         // a file the game has begun but not finished reading
     std::set<FileId> loaded_code;          // overlays read in full with memory writes due
@@ -145,6 +146,9 @@ void activate_now(const Resolution &resolution) {
 bool can_switch(const Resolution &next) {
     State &s = state();
     if (!s.directory) return false;
+    // Until the game opens the archive (the launcher is up) any layout can
+    // still be served: it has not seen the size or the directory yet.
+    if (!s.seen) return true;
     const std::shared_ptr<const Layout> wanted = layout_for(next);
     const Layout disc = Layout::build(*s.directory, {});
     const Layout &now = s.layout ? *s.layout : disc;
@@ -252,6 +256,16 @@ void attach_disc(IsoImage *disc) {
 
 std::optional<DiscRange> data_bin_on_disc() { return state().range; }
 
+void note_archive_opened() { state().seen = true; }
+
+std::vector<std::uint8_t> entry(FileId file) {
+    State &s = state();
+    if (!s.view || !s.directory || file >= s.directory->entries()) return {};
+    if (s.overlay && s.overlay->touches(file))
+        if (const auto content = s.overlay->content(file)) return content->bytes;
+    return s.view->original(file);
+}
+
 bool serving() { return state().serving; }
 
 std::uint64_t data_bin_size() {
@@ -262,6 +276,7 @@ std::uint64_t data_bin_size() {
 
 std::size_t read_data_bin(std::uint64_t offset, std::span<std::uint8_t> out) {
     State &s = state();
+    s.seen = true;
     if (!s.serving || !s.view) return raw_read(offset, out);
     if (s.waiting && !switch_waits(*s.waiting)) activate_now(*s.waiting);
     if (!s.serving) return raw_read(offset, out);

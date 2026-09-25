@@ -41,10 +41,16 @@ struct DiscRange {
 
 // Whether the mods change what the game reads from DATA.BIN now. Cheap.
 [[nodiscard]] bool serving();
+// The game opened DATA.BIN or asked for its size. From then on a change to the
+// archive's layout waits for the next start.
+void note_archive_opened();
 // DATA.BIN's size as the game sees it: larger when a mod's file grew it.
 [[nodiscard]] std::uint64_t data_bin_size();
 // Reads DATA.BIN as the game sees it, at an offset into the archive.
 std::size_t read_data_bin(std::uint64_t offset, std::span<std::uint8_t> out);
+// One entry of DATA.BIN as the game gets it, decrypted: a mod's file where one
+// replaces or patches it, else the disc's. Empty when there is no disc.
+[[nodiscard]] std::vector<std::uint8_t> entry(FileId file);
 
 // The game flushed its instruction cache, which it does right after copying a
 // code overlay into place: the point where a code overlay has finished
