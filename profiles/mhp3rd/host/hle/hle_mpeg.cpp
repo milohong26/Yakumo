@@ -602,7 +602,11 @@ void register_movie_skip(HleRegistrar &hle) {
 bool mpeg_active() { return !module().instances.empty(); }
 
 void register_mpeg(HleRegistrar &hle) {
-    if (!movie::AvcDecoder::available() || !audio::AtracDecoder::available()) {
+    // MHP3RD_SKIP_MOVIES=1 skips the movies as a build without FFmpeg does:
+    // for scripted runs that should not wait through the intros.
+    const bool skip = std::getenv("MHP3RD_SKIP_MOVIES") != nullptr && *std::getenv("MHP3RD_SKIP_MOVIES") != '0';
+    if (skip || !movie::AvcDecoder::available() || !audio::AtracDecoder::available()) {
+        if (skip) std::cout << "[mpeg] movies skipped: MHP3RD_SKIP_MOVIES is set\n";
         register_movie_skip(hle);
         return;
     }
