@@ -620,7 +620,7 @@ void Effects::record(VkCommandBuffer commands, VkImage color, VkImageView color_
     composite.c[0] = options.vignette;
     composite.c[1] = options.split_toning;
     composite.c[2] = options.shoulder;
-    composite.c[3] = 0.0f;
+    composite.c[3] = options.antialias;
     composite.light[0] = camera.fog_end;
     composite.light[1] = camera.fog_scale;
     composite.light[2] = camera.fog ? 1.0f : 0.0f;
@@ -698,6 +698,7 @@ Options options_from_environment(Options options) {
         else if (name == "wrap") options.wrap = value;
         else if (name == "ground") options.ground = value;
         else if (name == "knee") options.knee = value;
+        else if (name == "aa") options.antialias = value;
     }
     return options;
 }

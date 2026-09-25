@@ -15,7 +15,8 @@
 //        strength, w sharpening (0 to 1)
 //   p.b: x exposure, y contrast, z saturation, w vibrance
 //   p.c: x vignette, y warm/cool split toning, z shoulder knee (linear),
-//        w frame noise offset
+//        w edge anti-aliasing: how much of a pixel's sub-pixel contrast it
+//        blends away (0: off)
 //   p.light: x the GE fog's end, y its scale, z 1 when the scene is fogged,
 //            w what MHP3RD_EFFECTS_DEBUG shows instead (1 occlusion,
 //            2 contact shadows, 3 distance, 4 bloom)
@@ -43,6 +44,90 @@ vec4 sharpened(vec2 at, float amount) {
     vec3 weight = -amp / mix(8.0, 5.0, amount);
     vec3 rgb = (centre.rgb + (n + s + w + e) * weight) / (1.0 + 4.0 * weight);
     return vec4(clamp(rgb, 0.0, 1.0), centre.a);
+}
+
+// Edge anti-aliasing on the 8-bit scene, before the interface is drawn: the
+// scheme of FXAA's quality preset. Where the luma contrast around the pixel
+// is high enough, the edge's direction is taken from the second differences
+// across it, the edge is followed both ways to its ends, and the pixel is
+// sampled shifted across the edge by how far it sits from the nearer end, as
+// the edge's slope would have covered it. Thin features the ends do not find
+// are blended by their contrast with the 3x3 average instead.
+float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+float luma_at(vec2 at) { return luma(textureLod(scene, at, 0.0).rgb); }
+
+bool antialiased(vec2 at, float subpixel, out vec3 color) {
+    vec2 t = 1.0 / vec2(textureSize(scene, 0));
+    vec3 centre = textureLod(scene, at, 0.0).rgb;
+    color = centre;
+    float m = luma(centre);
+    float n = luma(textureLodOffset(scene, at, 0.0, ivec2(0, -1)).rgb);
+    float s = luma(textureLodOffset(scene, at, 0.0, ivec2(0, 1)).rgb);
+    float w = luma(textureLodOffset(scene, at, 0.0, ivec2(-1, 0)).rgb);
+    float e = luma(textureLodOffset(scene, at, 0.0, ivec2(1, 0)).rgb);
+    float lo = min(m, min(min(n, s), min(w, e)));
+    float hi = max(m, max(max(n, s), max(w, e)));
+    float range = hi - lo;
+    if (range < max(0.0312, hi * 0.125)) return false;
+    float nw = luma(textureLodOffset(scene, at, 0.0, ivec2(-1, -1)).rgb);
+    float ne = luma(textureLodOffset(scene, at, 0.0, ivec2(1, -1)).rgb);
+    float sw = luma(textureLodOffset(scene, at, 0.0, ivec2(-1, 1)).rgb);
+    float se = luma(textureLodOffset(scene, at, 0.0, ivec2(1, 1)).rgb);
+
+    // A horizontal edge changes from north to south.
+    float across_h = abs(nw - 2.0 * w + sw) + 2.0 * abs(n - 2.0 * m + s) + abs(ne - 2.0 * e + se);
+    float across_v = abs(nw - 2.0 * n + ne) + 2.0 * abs(w - 2.0 * m + e) + abs(sw - 2.0 * s + se);
+    bool horizontal = across_v >= across_h;
+    float before = horizontal ? n : w;
+    float after = horizontal ? s : e;
+    float step_across = horizontal ? t.y : t.x;
+    float gradient_before = abs(before - m);
+    float gradient_after = abs(after - m);
+    float side;
+    if (gradient_before >= gradient_after) {
+        step_across = -step_across;
+        side = 0.5 * (before + m);
+    } else {
+        side = 0.5 * (after + m);
+    }
+    float threshold = 0.25 * max(gradient_before, gradient_after);
+
+    // Along the edge, half a pixel over, until the luma leaves the edge's.
+    vec2 on_edge = at + (horizontal ? vec2(0.0, step_across * 0.5) : vec2(step_across * 0.5, 0.0));
+    vec2 along = horizontal ? vec2(t.x, 0.0) : vec2(0.0, t.y);
+    const float kSteps[10] = float[](1.0, 1.0, 1.0, 1.5, 2.0, 2.0, 2.0, 4.0, 8.0, 8.0);
+    vec2 end_a = on_edge - along;
+    vec2 end_b = on_edge + along;
+    float delta_a = luma_at(end_a) - side;
+    float delta_b = luma_at(end_b) - side;
+    bool done_a = abs(delta_a) >= threshold;
+    bool done_b = abs(delta_b) >= threshold;
+    for (int i = 1; i < 10 && !(done_a && done_b); ++i) {
+        if (!done_a) {
+            end_a -= along * kSteps[i];
+            delta_a = luma_at(end_a) - side;
+            done_a = abs(delta_a) >= threshold;
+        }
+        if (!done_b) {
+            end_b += along * kSteps[i];
+            delta_b = luma_at(end_b) - side;
+            done_b = abs(delta_b) >= threshold;
+        }
+    }
+    float distance_a = horizontal ? at.x - end_a.x : at.y - end_a.y;
+    float distance_b = horizontal ? end_b.x - at.x : end_b.y - at.y;
+    bool nearer_a = distance_a < distance_b;
+    float shift = 0.5 - min(distance_a, distance_b) / (distance_a + distance_b);
+    // Only when the nearer end turns the way this pixel does.
+    if (((nearer_a ? delta_a : delta_b) < 0.0) == (m < side)) shift = 0.0;
+
+    float average = (2.0 * (n + s + w + e) + nw + ne + sw + se) / 12.0;
+    float blend = clamp(abs(average - m) / range, 0.0, 1.0);
+    blend = smoothstep(0.0, 1.0, blend);
+    shift = max(shift, blend * blend * subpixel);
+    color = textureLod(scene, at + (horizontal ? vec2(0.0, shift * step_across) : vec2(shift * step_across, 0.0)),
+                       0.0).rgb;
+    return true;
 }
 
 // Half-resolution visibility at this pixel: the four neighbours, weighted by
@@ -108,7 +193,10 @@ vec3 grade(vec3 color) {
 }
 
 void main() {
-    vec4 base = sharpened(uv, p.a.w);
+    // An edge is smoothed and left unsharpened; the rest is sharpened.
+    vec3 smoothed;
+    vec4 base = (p.c.w > 0.0 && antialiased(uv, p.c.w, smoothed)) ? vec4(smoothed, texture(scene, uv).a)
+                                                                   : sharpened(uv, p.a.w);
     vec3 color = to_linear(base.rgb);
     float dist = view_distance(texelFetch(depth_buffer, ivec2(gl_FragCoord.xy), 0).r);
     bool sky = dist >= kSky * 0.5;
@@ -147,8 +235,8 @@ void main() {
 
     vec3 srgb = to_srgb(color);
     // Triangular dither of one 8-bit step, to hide banding.
-    float n0 = ign(gl_FragCoord.xy + p.c.w);
-    float n1 = ign(gl_FragCoord.yx * 1.37 + 17.0 + p.c.w);
+    float n0 = ign(gl_FragCoord.xy);
+    float n1 = ign(gl_FragCoord.yx * 1.37 + 17.0);
     srgb += (n0 + n1 - 1.0) / 255.0;
     out_color = vec4(clamp(srgb, 0.0, 1.0), base.a);
 }

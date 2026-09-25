@@ -52,6 +52,7 @@ struct Options {
     float bloom_knee{0.5f};
     float bloom_cap{3.0f};
     float sharpen{0.2f};
+    float antialias{0.5f};   // edge anti-aliasing's sub-pixel blend; 0 turns it off
     float exposure{1.0f};
     float contrast{1.06f};
     float saturation{1.03f};
@@ -190,7 +191,7 @@ private:
 // Options with MHP3RD_EFFECTS_OPTIONS applied: `name=value` pairs separated
 // by commas (ao, radius, shadows, bloom, threshold, knee, cap, sharpen,
 // exposure, contrast, saturation, vibrance, vignette, split, shoulder,
-// highlight, gloss, rim, wrap, ground, knee).
+// highlight, gloss, rim, wrap, ground, knee, aa).
 [[nodiscard]] Options options_from_environment(Options options);
 
 } // namespace mhp3rd::gpu::post
