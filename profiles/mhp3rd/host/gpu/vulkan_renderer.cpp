@@ -5941,13 +5941,14 @@ void VulkanRenderer::begin_frame() {
     } else if (impl.dump_frame) {
         impl.dump_frame = false;
     }
+    // MHP3RD_EFFECTS_DEBUG, when set, decides over debug= in the options.
     static const int effects_debug = [] {
         const char *text = std::getenv("MHP3RD_EFFECTS_DEBUG");
-        return text != nullptr ? std::atoi(text) : 0;
+        return text != nullptr ? std::atoi(text) : -1;
     }();
     static post::Options effects_options = [] {
         post::Options options = post::options_from_environment(post::Options{});
-        options.debug = effects_debug;
+        if (effects_debug >= 0) options.debug = effects_debug;
         return options;
     }();
     // MHP3RD_EFFECTS_LIVE: a file of options read again whenever it changes,
@@ -5962,7 +5963,7 @@ void VulkanRenderer::begin_frame() {
             std::ifstream file(live_path);
             const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
             post::Options options = post::options_from_environment(post::Options{});
-            options.debug = effects_debug;
+            if (effects_debug >= 0) options.debug = effects_debug;
             effects_options = post::options_from_text(options, text);
             std::cout << "[effects] options from " << live_path << ": " << text << "\n" << std::flush;
         }
