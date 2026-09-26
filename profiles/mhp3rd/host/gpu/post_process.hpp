@@ -95,6 +95,7 @@ struct Options {
     // Light shafts through the air where the sun reaches it; 0 turns them off.
     float rays{0.22f};
     float beams{0.3f};  // beams from the bright sky through what stands against it, on the screen
+    float sun_disc{1.0f};  // the sun's disc and glare where the sky is bright around it
     // Water: reflections of the scene and sky on the game's water surfaces,
     // with moving ripples and the sun's glints. 0 turns them off.
     float water{1.0f};
@@ -243,7 +244,11 @@ private:
     Image visibility_a_;
     Image visibility_b_;
     Image rays_;     // a quarter of the target: light shafts
-    Image average_;  // 1x1: how much of the scene the sun reaches
+    // 1x1: the sky's colour and how much of the scene the sun reaches, eased
+    // towards each game frame's; two, each game frame writing one from the
+    // other.
+    std::array<Image, 2> averages_{};
+    std::uint32_t average_index_{};  // the one written last
     Image water_mask_;   // full resolution: how much of each pixel is water
     Image reflection_;   // half resolution: the water's reflection
     Image bounce_;       // a quarter of the target: sunlight bounced off what it lights
@@ -255,9 +260,10 @@ private:
     VkDescriptorSet blur_set_{};
     std::array<VkDescriptorSet, kBloomLevels> down_sets_{};
     std::array<VkDescriptorSet, kBloomLevels> up_sets_{};
-    VkDescriptorSet composite_set_{};
+
     VkDescriptorSet rays_set_{};
-    VkDescriptorSet average_set_{};
+    std::array<VkDescriptorSet, 2> average_sets_{};    // writing averages_[i] from the other
+    std::array<VkDescriptorSet, 2> composite_sets_{};  // reading averages_[i]
     VkDescriptorSet reflect_set_{};
     VkDescriptorSet bounce_set_{};
 

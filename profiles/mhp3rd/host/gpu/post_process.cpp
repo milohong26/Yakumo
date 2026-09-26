@@ -804,6 +804,7 @@ void Effects::write_sun(const Camera &camera, const Options &options) {
     block.clouds[3] = options.light_bleed;
     block.bounce[0] = options.bounce;
     block.bounce[1] = options.beams;
+    block.bounce[2] = options.sun_disc;
     const std::uint32_t slot = sun_next_++ % kSunSlots;
     sun_offset_ = static_cast<std::uint32_t>(slot * sun_stride_);
     std::memcpy(static_cast<std::uint8_t *>(sun_mapped_) + sun_offset_, &block, sizeof(block));
@@ -917,7 +918,9 @@ bool Effects::resize(VkExtent2D extent, VkFormat depth_format, std::string &erro
         !make_image(visibility_a_, half, kVisibility, kDrawn, VK_IMAGE_ASPECT_COLOR_BIT, pass_rg16f_, error) ||
         !make_image(visibility_b_, half, kVisibility, kDrawn, VK_IMAGE_ASPECT_COLOR_BIT, pass_rg16f_, error) ||
         !make_image(rays_, half_of(extent, 2), kVisibility, kDrawn, VK_IMAGE_ASPECT_COLOR_BIT, pass_rg16f_, error) ||
-        !make_image(average_, {1u, 1u}, VK_FORMAT_R16G16B16A16_SFLOAT, kDrawn, VK_IMAGE_ASPECT_COLOR_BIT,
+        !make_image(averages_[0], {1u, 1u}, VK_FORMAT_R16G16B16A16_SFLOAT, kDrawn, VK_IMAGE_ASPECT_COLOR_BIT,
+                    pass_average_, error) ||
+        !make_image(averages_[1], {1u, 1u}, VK_FORMAT_R16G16B16A16_SFLOAT, kDrawn, VK_IMAGE_ASPECT_COLOR_BIT,
                     pass_average_, error) ||
         !make_image(water_mask_, extent, VK_FORMAT_R8_UNORM, kDrawn, VK_IMAGE_ASPECT_COLOR_BIT, VK_NULL_HANDLE,
                     error) ||
@@ -956,12 +959,16 @@ bool Effects::resize(VkExtent2D extent, VkFormat depth_format, std::string &erro
         down_sets_[i] = make_set({i == 0 ? scene_color_.view : down_[i - 1].view}, {L});
         up_sets_[i] = make_set({i == kBloomLevels - 1 ? down_[i].view : up_[i + 1].view, down_[i].view}, {L, L});
     }
-    composite_set_ = make_set({scene_color_.view, scene_depth_.view, distances_.view, visibility_b_.view, up_[0].view,
-                               rays_.view, average_.view, water_mask_.view, reflection_.view, bounce_.view},
-                              {L, N, N, L, L, L, N, N, L, L});
+    for (std::size_t i = 0; i < 2u; ++i) {
+        composite_sets_[i] = make_set({scene_color_.view, scene_depth_.view, distances_.view, visibility_b_.view,
+                                       up_[0].view, rays_.view, averages_[i].view, water_mask_.view, reflection_.view,
+                                       bounce_.view},
+                                      {L, N, N, L, L, L, N, N, L, L});
+        average_sets_[i] = make_set({visibility_b_.view, distances_.view, scene_color_.view, averages_[1u - i].view},
+                                    {N, N, N, N});
+    }
     bounce_set_ = make_set({scene_color_.view, visibility_b_.view, distances_.view}, {L, L, N});
     rays_set_ = make_set({distances_.view, scene_color_.view}, {N, L});
-    average_set_ = make_set({visibility_b_.view, distances_.view, scene_color_.view}, {N, N, N});
     reflect_set_ = make_set({distances_.view, scene_color_.view, water_mask_.view}, {N, L, L});
     sized_ = true;
     primed_ = false;
@@ -988,7 +995,7 @@ void Effects::prime(VkCommandBuffer commands) {
     if (primed_) return;
     primed_ = true;
     std::vector<std::pair<Image *, float>> images{
-        {&distances_, 1.0e6f}, {&visibility_a_, 1.0f}, {&visibility_b_, 1.0f}, {&rays_, 0.0f}, {&average_, 1.0f},
+        {&distances_, 1.0e6f}, {&visibility_a_, 1.0f}, {&visibility_b_, 1.0f}, {&rays_, 0.0f}, {&averages_[0], 1.0f}, {&averages_[1], 1.0f},
         {&water_mask_, 0.0f},  {&reflection_, 0.0f}, {&bounce_, 0.0f}};
     for (Image &image : down_) images.push_back({&image, 0.0f});
     for (Image &image : up_) images.push_back({&image, 0.0f});
@@ -1018,7 +1025,7 @@ void Effects::destroy_sized() {
     destroy_image(visibility_a_);
     destroy_image(visibility_b_);
     destroy_image(rays_);
-    destroy_image(average_);
+    for (Image &image : averages_) destroy_image(image);
     destroy_image(water_mask_);
     destroy_image(reflection_);
     destroy_image(bounce_);
@@ -1228,8 +1235,12 @@ void Effects::record(VkCommandBuffer commands, VkImage color, VkImageView color_
         run(commands, pass_rg16f_, visibility_b_.framebuffer, visibility_b_.extent, blur_pipeline_, blur_set_, params);
         // The frames interpolated between the game's keep the game frame's
         // average: it changes slowly.
-        if (options.sun > 0.0f && bloom)
-            run(commands, pass_average_, average_.framebuffer, average_.extent, average_pipeline_, average_set_, params);
+        if (options.sun > 0.0f && bloom) {
+            const std::uint32_t next = average_index_ ^ 1u;
+            run(commands, pass_average_, averages_[next].framebuffer, averages_[next].extent, average_pipeline_,
+                average_sets_[next], params);
+            average_index_ = next;
+        }
     }
     // Bounced light is soft: the frames interpolated between the game's keep
     // the game frame's.
@@ -1307,7 +1318,8 @@ void Effects::record(VkCommandBuffer commands, VkImage color, VkImageView color_
         composite.a[0] = 0.0f;
         composite.a[1] = 0.0f;
     }
-    run(commands, pass_target_, target_framebuffer, extent_, composite_pipeline_, composite_set_, composite);
+    run(commands, pass_target_, target_framebuffer, extent_, composite_pipeline_, composite_sets_[average_index_],
+        composite);
     stamp(commands, slot, 6u);
 }
 
@@ -1398,6 +1410,7 @@ Options options_from_text(Options options, const std::string &text) {
         else if (name == "bleed") options.light_bleed = value;
         else if (name == "bounce") options.bounce = value;
         else if (name == "beams") options.beams = value;
+        else if (name == "sundisc") options.sun_disc = value;
         else if (name == "wind") options.wind = value;
         else if (name == "reach") options.rays_reach = value;
         else if (name == "debug") options.debug = static_cast<int>(value);

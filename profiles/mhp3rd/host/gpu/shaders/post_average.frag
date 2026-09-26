@@ -13,6 +13,7 @@
 layout(set = 0, binding = 0) uniform sampler2D visibility;  // y: sunlight
 layout(set = 0, binding = 1) uniform sampler2D distances;
 layout(set = 0, binding = 2) uniform sampler2D scene;
+layout(set = 0, binding = 3) uniform sampler2D previous;  // the last game frame's, eased towards
 layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 out_average;
 
@@ -35,5 +36,9 @@ void main() {
             surfaces += 1.0;
         }
     }
-    out_average = vec4(skies > 0.0 ? sky / skies : vec3(0.0), surfaces > 0.0 ? lit / surfaces : 1.0);
+    vec4 before = texelFetch(previous, ivec2(0), 0);
+    vec4 now = vec4(skies > 0.0 ? sky / skies : before.rgb, surfaces > 0.0 ? lit / surfaces : before.a);
+    // Eased over about half a second, as eyes adapt: turning into a cave or
+    // out of it does not jump.
+    out_average = mix(before, now, 0.08);
 }

@@ -13,7 +13,8 @@ layout(set = 0, binding = 6) uniform Sun {
     vec4 water;           // x: reflection strength, y: ripples, z: time in seconds, w: 1 when water was drawn
     vec4 clouds;          // x: how much their shadows darken, y: cover (0 to 1), z: size in world units,
                           // w: how much bright light lights the surfaces around it
-    vec4 bounce;          // x: how much sunlight bounces off what it lights, y: screen-space beams' strength
+    vec4 bounce;          // x: how much sunlight bounces off what it lights, y: screen-space beams' strength,
+                          // z: the sun's disc
 } sun;
 
 float cloud_hash(vec2 p) {

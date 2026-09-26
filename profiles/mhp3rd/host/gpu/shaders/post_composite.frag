@@ -239,6 +239,14 @@ void main() {
         float far = sky ? 1.0 : smoothstep(sun.params.w * 1.2, sun.params.w * 3.0, dist);
         float glow = pow(towards, 6.0) * 0.22 + pow(towards, 48.0) * 0.45;
         color += sun.color.rgb * (glow * far * sun.color.w * sun.rays.x * 5.0);
+        if (sky && sun.bounce.z > 0.0) {
+            // The sun's disc and its glare, where the sky around it is
+            // bright: not through the game's clouds or a dark sky.
+            float clear_sky = smoothstep(0.35, 0.75, luminance(color));
+            float disc = smoothstep(0.99975, 0.99985, towards);
+            float glare = pow(towards, 900.0) * 1.5 + pow(towards, 120.0) * 0.35;
+            color += sun.color.rgb * ((disc * 6.0 + glare) * clear_sky * sun.color.w * sun.bounce.z);
+        }
     }
     if (!sky && sun.water.w > 0.5) {
         float water = texelFetch(water_mask, ivec2(gl_FragCoord.xy), 0).r;
