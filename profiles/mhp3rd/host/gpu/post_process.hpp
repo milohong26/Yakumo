@@ -43,7 +43,7 @@ struct Camera {
 
 // How strong each effect is. Zero turns one off.
 struct Options {
-    float ambient_occlusion{0.85f};
+    float ambient_occlusion{1.0f};
     float occlusion_radius{42.0f};  // in the game's units: a hunter is about 170 tall
     float contact_shadows{0.0f};  // off: without temporal filtering the rays are too noisy yet
     float shadow_length{36.0f};
@@ -51,27 +51,27 @@ struct Options {
     float shadow_distance{1500.0f};
     // Bloom works on light above the shoulder's knee, expanded as if the
     // picture had not been clipped to white (up to bloom_cap).
-    float bloom{0.2f};
+    float bloom{0.22f};
     float bloom_threshold{1.0f};
     float bloom_knee{0.5f};
     float bloom_cap{3.0f};
     float sharpen{0.2f};
     float antialias{0.5f};   // edge anti-aliasing's sub-pixel blend; 0 turns it off
     float exposure{1.0f};
-    float contrast{1.12f};
+    float contrast{1.16f};
     float saturation{1.05f};
-    float vibrance{0.3f};
+    float vibrance{0.4f};
     float vignette{0.14f};
-    float split_toning{0.6f};
+    float split_toning{0.9f};
     float shoulder{0.8f};
     // Lit models shaded per pixel (video.lighting; ge.frag): the strength of
     // the lights' highlights and their sharpness (Blinn-Phong power), the rim
     // light, how far diffuse light wraps past the terminator, and the ambient
     // light from below, against 2 - ground from above; light past the knee
     // rolls off towards white instead of clipping (0 clips, as the GE).
-    float highlight{0.8f};
+    float highlight{1.2f};
     float gloss{24.0f};
-    float rim{0.45f};
+    float rim{0.7f};
     float wrap{0.2f};
     float ground{0.75f};
     float knee{0.6f};
@@ -81,8 +81,8 @@ struct Options {
     // light of the sun's colour; shadowed ones fall to `shade` of their
     // brightness. `shadow_range`: half the width of the ground the shadow
     // map covers around the camera, in the game's units.
-    float sun{0.8f};
-    float shade{0.47f};
+    float sun{1.0f};
+    float shade{0.42f};
     float warmth{1.0f};  // how far sunlight leans towards gold and shade towards blue
     float sun_elevation{52.0f};  // used where the game's own sun is not known
     float sun_azimuth{35.0f};
