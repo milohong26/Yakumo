@@ -27,7 +27,7 @@ layout(set = 0, binding = 2) uniform sampler2D distances;  // half resolution
 layout(set = 0, binding = 3) uniform sampler2D visibility; // half resolution: ambient, light
 layout(set = 0, binding = 4) uniform sampler2D bloom;      // half resolution, expanded linear light
 layout(set = 0, binding = 7) uniform sampler2D rays;       // quarter resolution: light shafts
-layout(set = 0, binding = 8) uniform sampler2D average;    // 1x1: x how much of the scene the sun reaches
+layout(set = 0, binding = 8) uniform sampler2D average;    // 1x1: rgb the sky's colour, a how much the sun reaches
 layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 out_color;
 
@@ -235,9 +235,13 @@ void main() {
         // the game's own light.
         float near = 1.0 - smoothstep(sun.params.w * 1.1, sun.params.w * 2.2, dist);
         vec3 lit = vec3(1.0) + sun.color.rgb * sun.color.w;
-        // Where the sun reaches little of the view, the shade eases.
-        float adapted = smoothstep(0.04, 0.35, texelFetch(average, ivec2(0), 0).x);
-        vec3 shaded = sun.shade.rgb * mix(1.0 - (1.0 - sun.shade.w) * 0.35, sun.shade.w, adapted);
+        // Where the sun reaches little of the view, the shade eases; its
+        // tint leans towards the sky's own colour, which fills shadows.
+        vec4 around = texelFetch(average, ivec2(0), 0);
+        float adapted = smoothstep(0.04, 0.35, around.a);
+        float sky_luma = luminance(around.rgb);
+        vec3 tint = sky_luma > 0.02 ? mix(sun.shade.rgb, around.rgb / sky_luma, 0.5) : sun.shade.rgb;
+        vec3 shaded = tint * mix(1.0 - (1.0 - sun.shade.w) * 0.35, sun.shade.w, adapted);
         color *= mix(vec3(1.0), mix(shaded, lit, vis.y), clear * near);
     }
     color += texture(bloom, uv).rgb * p.a.z;

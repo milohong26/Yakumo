@@ -192,6 +192,7 @@ private:
     VkRenderPass pass_rg16f_{};
     VkRenderPass pass_rgba16f_{};
     VkRenderPass pass_target_{};
+    VkRenderPass pass_average_{};
     VkPipeline depth_pipeline_{};
     VkPipeline ao_pipeline_{};
     VkPipeline blur_pipeline_{};

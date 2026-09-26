@@ -333,7 +333,8 @@ bool Effects::create(VkDevice device, VkPhysicalDevice physical_device, VkPipeli
     if (!check(vkCreateShaderModule(device_, &module_info, nullptr, &vertex_), "vkCreateShaderModule (effects)", error))
         return false;
     if (!make_pass(kDistance, false, pass_r32f_, error) || !make_pass(kVisibility, false, pass_rg16f_, error) ||
-        !make_pass(bloom_format_, false, pass_rgba16f_, error) || !make_pass(kSceneColor, true, pass_target_, error))
+        !make_pass(bloom_format_, false, pass_rgba16f_, error) || !make_pass(kSceneColor, true, pass_target_, error) ||
+        !make_pass(VK_FORMAT_R16G16B16A16_SFLOAT, false, pass_average_, error))
         return false;
     if (!make_pipeline(kPostDepthShader, sizeof(kPostDepthShader), pass_r32f_, depth_pipeline_, error) ||
         !make_pipeline(kPostAoShader, sizeof(kPostAoShader), pass_rg16f_, ao_pipeline_, error) ||
@@ -342,7 +343,7 @@ bool Effects::create(VkDevice device, VkPhysicalDevice physical_device, VkPipeli
         !make_pipeline(kPostBloomUpShader, sizeof(kPostBloomUpShader), pass_rgba16f_, up_pipeline_, error) ||
         !make_pipeline(kPostCompositeShader, sizeof(kPostCompositeShader), pass_target_, composite_pipeline_, error) ||
         !make_pipeline(kPostRaysShader, sizeof(kPostRaysShader), pass_rg16f_, rays_pipeline_, error) ||
-        !make_pipeline(kPostAverageShader, sizeof(kPostAverageShader), pass_rg16f_, average_pipeline_, error))
+        !make_pipeline(kPostAverageShader, sizeof(kPostAverageShader), pass_average_, average_pipeline_, error))
         return false;
     if (!make_shadow_resources(error)) return false;
     ready_ = true;
@@ -727,7 +728,8 @@ bool Effects::resize(VkExtent2D extent, VkFormat depth_format, std::string &erro
         !make_image(visibility_a_, half, kVisibility, kDrawn, VK_IMAGE_ASPECT_COLOR_BIT, pass_rg16f_, error) ||
         !make_image(visibility_b_, half, kVisibility, kDrawn, VK_IMAGE_ASPECT_COLOR_BIT, pass_rg16f_, error) ||
         !make_image(rays_, half_of(extent, 2), kVisibility, kDrawn, VK_IMAGE_ASPECT_COLOR_BIT, pass_rg16f_, error) ||
-        !make_image(average_, {1u, 1u}, kVisibility, kDrawn, VK_IMAGE_ASPECT_COLOR_BIT, pass_rg16f_, error)) {
+        !make_image(average_, {1u, 1u}, VK_FORMAT_R16G16B16A16_SFLOAT, kDrawn, VK_IMAGE_ASPECT_COLOR_BIT,
+                    pass_average_, error)) {
         destroy_sized();
         return false;
     }
@@ -763,7 +765,7 @@ bool Effects::resize(VkExtent2D extent, VkFormat depth_format, std::string &erro
                                rays_.view, average_.view},
                               {L, N, N, L, L, L, N});
     rays_set_ = make_set({distances_.view}, {N});
-    average_set_ = make_set({visibility_b_.view, distances_.view}, {N, N});
+    average_set_ = make_set({visibility_b_.view, distances_.view, scene_color_.view}, {N, N, N});
     sized_ = true;
     primed_ = false;
     return true;
@@ -830,7 +832,7 @@ void Effects::destroy() {
          {depth_pipeline_, ao_pipeline_, blur_pipeline_, down_pipeline_, up_pipeline_, composite_pipeline_,
           rays_pipeline_, average_pipeline_})
         vkDestroyPipeline(device_, pipeline, nullptr);
-    for (VkRenderPass pass : {pass_r32f_, pass_rg16f_, pass_rgba16f_, pass_target_})
+    for (VkRenderPass pass : {pass_r32f_, pass_rg16f_, pass_rgba16f_, pass_target_, pass_average_})
         vkDestroyRenderPass(device_, pass, nullptr);
     destroy_image(shadow_);
     vkDestroyPipeline(device_, shadow_pipeline_, nullptr);
@@ -856,7 +858,7 @@ void Effects::destroy() {
     timer_next_ = 0u;
     depth_pipeline_ = ao_pipeline_ = blur_pipeline_ = down_pipeline_ = up_pipeline_ = composite_pipeline_ = {};
     rays_pipeline_ = average_pipeline_ = VK_NULL_HANDLE;
-    pass_r32f_ = pass_rg16f_ = pass_rgba16f_ = pass_target_ = {};
+    pass_r32f_ = pass_rg16f_ = pass_rgba16f_ = pass_target_ = pass_average_ = {};
     vertex_ = {};
     layout_ = {};
     set_layout_ = {};
@@ -1018,7 +1020,7 @@ void Effects::record(VkCommandBuffer commands, VkImage color, VkImageView color_
         stamp(commands, slot, 3u);
         run(commands, pass_rg16f_, visibility_b_.framebuffer, visibility_b_.extent, blur_pipeline_, blur_set_, params);
         if (options.sun > 0.0f)
-            run(commands, pass_rg16f_, average_.framebuffer, average_.extent, average_pipeline_, average_set_, params);
+            run(commands, pass_average_, average_.framebuffer, average_.extent, average_pipeline_, average_set_, params);
     }
     if (!occlusion) stamp(commands, slot, 3u);
     if (options.rays > 0.0f && options.sun > 0.0f && shadow_drawn_) {
