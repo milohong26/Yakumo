@@ -303,8 +303,9 @@ void main() {
             found /= 6.0;
             found.rgb = found.a > 1e-3 ? found.rgb / found.a : vec3(0.0);
             vec3 sky_light = texelFetch(average, ivec2(0), 0).rgb;
-            vec3 mirrored = mix(sky_light * 1.1, found.rgb, found.a);
-            float amount = clamp(fresnel * 1.6 + 0.12, 0.0, 1.0) * water * sun.water.x * clear;
+            vec3 mirrored = mix(sky_light * 0.95, found.rgb, found.a);
+            // Never all mirror: the water's own colour stays under it.
+            float amount = clamp(fresnel * 1.3 + 0.1, 0.0, 0.75) * water * sun.water.x * clear;
             color = mix(color, mirrored, amount);
             vec3 h = normalize(sun.direction.xyz + v);
             float glint = pow(max(dot(n, h), 0.0), 600.0) * 60.0 + pow(max(dot(n, h), 0.0), 60.0) * 0.6;
