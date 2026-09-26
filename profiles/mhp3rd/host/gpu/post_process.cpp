@@ -803,6 +803,7 @@ void Effects::write_sun(const Camera &camera, const Options &options) {
     block.clouds[2] = std::max(options.cloud_size, 100.0f);
     block.clouds[3] = options.light_bleed;
     block.bounce[0] = options.bounce;
+    block.bounce[1] = options.beams;
     const std::uint32_t slot = sun_next_++ % kSunSlots;
     sun_offset_ = static_cast<std::uint32_t>(slot * sun_stride_);
     std::memcpy(static_cast<std::uint8_t *>(sun_mapped_) + sun_offset_, &block, sizeof(block));
@@ -959,7 +960,7 @@ bool Effects::resize(VkExtent2D extent, VkFormat depth_format, std::string &erro
                                rays_.view, average_.view, water_mask_.view, reflection_.view, bounce_.view},
                               {L, N, N, L, L, L, N, N, L, L});
     bounce_set_ = make_set({scene_color_.view, visibility_b_.view, distances_.view}, {L, L, N});
-    rays_set_ = make_set({distances_.view}, {N});
+    rays_set_ = make_set({distances_.view, scene_color_.view}, {N, L});
     average_set_ = make_set({visibility_b_.view, distances_.view, scene_color_.view}, {N, N, N});
     reflect_set_ = make_set({distances_.view, scene_color_.view, water_mask_.view}, {N, L, L});
     sized_ = true;
@@ -1245,7 +1246,7 @@ void Effects::record(VkCommandBuffer commands, VkImage color, VkImageView color_
     if (!occlusion) stamp(commands, slot, 3u);
     // Light shafts are soft and slow: the frames interpolated between the
     // game's keep the game frame's.
-    if (options.rays > 0.0f && options.sun > 0.0f && shadow_drawn_ && bloom) {
+    if ((options.rays > 0.0f || options.beams > 0.0f) && options.sun > 0.0f && bloom) {
         Params rays = params;
         rays.a[0] = 12.0f;
         rays.a[1] = static_cast<float>(sun_next_ % 64u) * 7.0f;
@@ -1394,6 +1395,7 @@ Options options_from_text(Options options, const std::string &text) {
         else if (name == "cloudsize") options.cloud_size = value;
         else if (name == "bleed") options.light_bleed = value;
         else if (name == "bounce") options.bounce = value;
+        else if (name == "beams") options.beams = value;
         else if (name == "wind") options.wind = value;
         else if (name == "reach") options.rays_reach = value;
         else if (name == "debug") options.debug = static_cast<int>(value);

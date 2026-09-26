@@ -289,11 +289,11 @@ void main() {
     // and walls near it as well as glowing.
     if (!sky) color += color * glow * (sun.clouds.w * 4.0);
     color += glow * p.a.z;
-    if (sun.rays.x > 0.0 && sun.direction.w > 0.5) {
+    if ((sun.rays.x > 0.0 || sun.bounce.y > 0.0) && sun.params.z > 0.5) {
         // Filtered up from a quarter of the resolution, which smooths the
         // march's dither.
-        float shafts = texture(rays, uv).r;
-        color += sun.color.rgb * (shafts * sun.rays.x);
+        vec2 shafts = texture(rays, uv).rg;
+        color += sun.color.rgb * (shafts.r * sun.rays.x + shafts.g * sun.bounce.y);
     }
     color = grade(max(color, vec3(0.0)));
     peak = max(color.r, max(color.g, color.b));

@@ -93,7 +93,8 @@ struct Options {
     // and soften away from it. 0 keeps them evenly sharp.
     float softness{0.025f};
     // Light shafts through the air where the sun reaches it; 0 turns them off.
-    float rays{0.1f};
+    float rays{0.22f};
+    float beams{0.3f};  // beams from the bright sky through what stands against it, on the screen
     // Water: reflections of the scene and sky on the game's water surfaces,
     // with moving ripples and the sun's glints. 0 turns them off.
     float water{1.0f};
