@@ -1210,6 +1210,10 @@ struct VulkanRenderer::Impl {
     std::vector<WaterDraw> water_draws;
     bool current_draw_water{};    // the draw being submitted is water (for its replay group)
     bool current_draw_foliage{};  // ...or foliage
+    // Foliage goes into the mask only where it can glow: with the sun in
+    // front of the camera, or to its sides. Decided at the frame's first
+    // foliage draw.
+    int foliage_mask_frame{-1};  // -1 undecided, 0 no, 1 yes
     void note_water(const DrawCall &call, bool water, bool foliage, const PushConstants &push, VkDescriptorSet texture,
                     const VkViewport &viewport, const VkRect2D &scissor, VkBuffer index_buffer,
                     VkDeviceSize vertex_base, VkDeviceSize index_base, std::uint32_t count);
@@ -1635,6 +1639,7 @@ struct VulkanRenderer::Impl {
         std::size_t effects_group{static_cast<std::size_t>(-1)};
         post::Camera effects_camera{};
         float wind_time{};  // the wind's clock for the frame (seconds)
+        bool foliage_mask{};  // its foliage went into the mask
         void clear() {
             effects_group = static_cast<std::size_t>(-1);
             summaries.clear();
@@ -3573,6 +3578,7 @@ void VulkanRenderer::Impl::reset_scene() {
     before_scene_draws = 0u;
     shadow_casters.clear();
     water_draws.clear();
+    foliage_mask_frame = -1;
     scene_lights_known = false;
 }
 
@@ -3700,6 +3706,7 @@ void VulkanRenderer::Impl::apply_effects(std::uint32_t address) {
     if (interpolating && recording_frame.recorded) {
         recording_frame.effects_group = recording_frame.groups.size();
         recording_frame.effects_camera = camera;
+        recording_frame.foliage_mask = foliage_mask_frame == 1;
     }
     Target &target = found->second;
     if (shadow_frame) draw_shadows(camera);
@@ -3831,6 +3838,18 @@ void VulkanRenderer::Impl::note_water(const DrawCall &call, bool water, bool fol
     if (!(water || foliage) || !effects_frame || effects_applied || count == 0u || !shows(call.target.color_address) ||
         water_draws.size() >= 8192u)
         return;
+    if (foliage && !water) {
+        if (foliage_mask_frame < 0) {
+            const std::array<float, 3> forward{-call.view[2], -call.view[6], -call.view[10]};
+            const float facing = game_sun_known ? forward[0] * game_sun[0] + forward[1] * game_sun[1] +
+                                                      forward[2] * game_sun[2]
+                                                : 1.0f;
+            // Leaves glow by the cube of the view's angle to the sun: looking
+            // well away from it, nowhere on the screen.
+            foliage_mask_frame = effect_options.translucency > 0.0f && effect_options.sun > 0.0f && facing > -0.3f;
+        }
+        if (foliage_mask_frame == 0) return;
+    }
     // Foliage only as far as the sun's light reaches in the composite (a
     // little past the shadow map), not the leaves painted on far hills.
     if (foliage && !water) {
@@ -3839,7 +3858,21 @@ void VulkanRenderer::Impl::note_water(const DrawCall &call, bool water, bool fol
         const float dx = sphere.centre[0] - eye[0], dy = sphere.centre[1] - eye[1], dz = sphere.centre[2] - eye[2];
         if (std::sqrt(dx * dx + dy * dy + dz * dz) - sphere.radius > effect_options.shadow_range * 2.2f) return;
     }
-    water_draws.push_back({push, texture, viewport, scissor, index_buffer, vertex_base, index_base, count, foliage});
+    // Draws that follow each other in the index buffer with the same state
+    // are one draw, as the renderer merges them.
+    if (!water_draws.empty()) {
+        WaterDraw &last = water_draws.back();
+        if (index_buffer != VK_NULL_HANDLE && last.index_buffer == index_buffer && last.vertex_base == vertex_base &&
+            last.index_base + last.count * sizeof(std::uint16_t) == index_base && last.foliage == (foliage && !water) &&
+            last.texture == texture && std::memcmp(&last.push, &push, sizeof(push)) == 0 &&
+            std::memcmp(&last.viewport, &viewport, sizeof(viewport)) == 0 &&
+            std::memcmp(&last.scissor, &scissor, sizeof(scissor)) == 0) {
+            last.count += count;
+            return;
+        }
+    }
+    water_draws.push_back(
+        {push, texture, viewport, scissor, index_buffer, vertex_base, index_base, count, foliage && !water});
 }
 
 void VulkanRenderer::Impl::draw_water(VkCommandBuffer commands, const Target &target,
@@ -7833,7 +7866,7 @@ void VulkanRenderer::Impl::replay(VkCommandBuffer commands, std::uint32_t slot, 
                                0u, sizeof(PushConstants), &state.push);
         set = state;
         known = true;
-        if ((drawn.water || drawn.foliage) && replay_effects)
+        if ((drawn.water || (drawn.foliage && older.foliage_mask)) && replay_effects)
             replay_water.push_back({state.push, state.texture, state.viewport, state.scissor, drawn.index_buffer,
                                     vertex_base, drawn.index_base, drawn.count, drawn.foliage && !drawn.water});
         vkCmdBindVertexBuffers(commands, 0u, 1u, &vertex_buffer, &vertex_base);
