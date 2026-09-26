@@ -1394,6 +1394,7 @@ Options options_from_text(Options options, const std::string &text) {
         else if (name == "cloudsize") options.cloud_size = value;
         else if (name == "bleed") options.light_bleed = value;
         else if (name == "bounce") options.bounce = value;
+        else if (name == "wind") options.wind = value;
         else if (name == "reach") options.rays_reach = value;
         else if (name == "debug") options.debug = static_cast<int>(value);
     }

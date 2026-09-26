@@ -403,6 +403,7 @@ Two settings in the Video section relight the game like a present-day remaster, 
   - **Bloom** of the brightest light, expanded through an invertible shoulder so pixels no light was added to come out unchanged. Its spread light also falls on the surfaces around it by their own colour, so fires and lanterns light what is near them.
   - **Edges**: edge anti-aliasing (the scheme of FXAA's quality preset), and contrast-adaptive sharpening elsewhere.
   - **Grade**: contrast on luminance, saturation and vibrance, a warm/cool split, a vignette, and dither.
+  - **Wind**: the scenery's leaves, grass and cloth (unlit draws cut out by alpha) sway in gusts, more the higher they stand above their model's origin; the frames interpolated between the game's sway between the two frames' times.
 
 The effects' images, passes and pipelines are made at start and when the resolution changes, never while playing. On an Apple M4 at the display's own size in fullscreen (about 1.8 megapixels), the game keeps 60 frames a second with frame interpolation. The frames interpolated between the game's own replay the effects at the same point, with their own camera, and reuse the game frame's bloom and shadow map.
 
@@ -413,6 +414,7 @@ The effects' images, passes and pipelines are made at start and when the resolut
 | Water | `water` (1.0; 0 turns reflections off), `ripples` (1.0) |
 | Clouds | `clouds` (0.55, how much their shadows darken; 0 turns them off), `cover` (0.45), `cloudsize` (1800, in the game's units) |
 | Bounced light | `bounce` (0.6; 0 turns it off) |
+| Wind | `wind` (2.5, how far foliage sways at full height, in the game's units; 0 keeps it still) |
 | Sun and shadows | `sun` (1.0; 0 turns sunlight and shadows off), `shade` (0.46, how bright shadowed surfaces stay), `warmth` (1.0), `range` (2200, half the width of the ground the shadow map covers, in the game's units), `soft` (0.025, penumbra per unit of distance; 0 keeps shadows evenly sharp), `gamesun` (1; 0 uses `elevation` and `azimuth` in degrees instead of the game's sun), `rays` (0.1), `reach` (2600), `g` (0.7, how much the air scatters towards the sun) |
 | Image | `ao` (1.0), `radius` (42, in the game's units), `bloom` (0.22), `bleed` (0.5, how much bright light lights the surfaces around it), `threshold`, `knee`, `cap`, `sharpen` (0.2), `aa` (0.5; 0 turns anti-aliasing off), `exposure`, `contrast` (1.16), `saturation` (1.05), `vibrance` (0.4), `vignette` (0.14), `split` (0.9), `shoulder` |
 | Models | `highlight` (1.2), `gloss` (24), `rim` (0.7), `wrap` (0.2), `ground` (0.75), `knee` (0.6; 0 clips as the PSP does) |

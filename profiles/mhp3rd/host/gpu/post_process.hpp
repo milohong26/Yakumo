@@ -110,6 +110,9 @@ struct Options {
     // Sunlight bounced off the surfaces it lights onto those around them,
     // most into the shade. 0 turns it off.
     float bounce{0.6f};
+    // How far the scenery's leaves, grass and cloth sway in the wind, in the
+    // game's units at their full height. 0 keeps them still.
+    float wind{2.5f};
     float rays_g{0.7f};  // how much the air scatters forward, towards the sun (Henyey-Greenstein g)
     float rays_reach{2600.0f};  // how far along a view ray the air is seen, in the game's units
     int debug{};  // 1 occlusion, 2 contact shadows, 3 distance, 4 bloom

@@ -126,6 +126,7 @@ static_assert(sizeof(PushConstants) == 128u, "PushConstants must fit the guarant
 constexpr float kPushFog = 1.0f;
 constexpr float kPushLighting = 2.0f;
 constexpr float kPushPerPixel = 4.0f;  // lit per pixel (settings: video.lighting)
+constexpr float kPushWind = 8.0f;      // swayed in the wind (post::Options::wind)
 
 struct GpuVertex {
     float x{}, y{}, z{}, w{1.0f};
@@ -1056,6 +1057,7 @@ struct VulkanRenderer::Impl {
     bool effects_ready{};
     bool effects_frame{};        // on for the frame being drawn
     bool per_pixel_frame{};      // lit draws lit per pixel in the frame being drawn
+    float wind_time{};           // the wind's clock for the frame being drawn (seconds)
     post::Options effect_options;
     struct SceneCamera {
         post::Camera camera;
@@ -1525,6 +1527,7 @@ struct VulkanRenderer::Impl {
         // last), with this camera; kNoEffects: none.
         std::size_t effects_group{static_cast<std::size_t>(-1)};
         post::Camera effects_camera{};
+        float wind_time{};  // the wind's clock for the frame (seconds)
         void clear() {
             effects_group = static_cast<std::size_t>(-1);
             summaries.clear();
@@ -5778,6 +5781,12 @@ void VulkanRenderer::begin_frame() {
         impl.recording_frame.recorded = true;
         impl.recording_frame.texture_clock = impl.texture_clock;
     }
+    {
+        static const auto started = std::chrono::steady_clock::now();
+        impl.wind_time = std::fmod(
+            std::chrono::duration<float>(std::chrono::steady_clock::now() - started).count(), 3600.0f);
+        impl.recording_frame.wind_time = impl.wind_time;
+    }
     impl.environment_version = 0u;
     impl.object_valid = false;
     impl.raw_valid = false;
@@ -6590,6 +6599,15 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     push.viewport = {static_cast<float>(kPspWidth), static_cast<float>(kPspHeight), call.through ? 1.0f : 0.0f,
                      (fogged ? kPushFog : 0.0f) + (lit ? kPushLighting : 0.0f) + (per_pixel ? kPushPerPixel : 0.0f)};
     push.view_z = {view_world[2], view_world[6], view_world[10], view_world[14]};
+    // The scenery's cut-out leaves, grass and cloth sway in the wind.
+    if (impl.effects_frame && impl.effect_options.wind > 0.0f && !call.through && !call.clear_mode && !raw &&
+        !call.lighting_enabled && call.texture.enabled && call.alpha_test.enabled &&
+        (call.alpha_test.function == 6u || call.alpha_test.function == 7u) &&
+        !interpolation::is_orthographic(call.projection)) {
+        push.viewport[0] = impl.wind_time;
+        push.viewport[1] = impl.effect_options.wind;
+        push.viewport[3] += kPushWind;
+    }
     push.texture_params = {call.texture.enabled ? 1.0f : 0.0f, static_cast<float>(call.texture.function),
                            static_cast<float>(call.alpha_test.enabled ? call.alpha_test.reference : 0u),
                            static_cast<float>(call.alpha_test.enabled ? call.alpha_test.function : 0u)};
@@ -7607,6 +7625,9 @@ void VulkanRenderer::Impl::replay(VkCommandBuffer commands, std::uint32_t slot, 
             }
             state.push.transform = transform;
             state.push.view_z = {view_world[2], view_world[6], view_world[10], view_world[14]};
+            // The wind's clock between the two frames'.
+            if ((static_cast<int>(state.push.viewport[3] + 0.5f) & 8) != 0)
+                state.push.viewport[0] = older.wind_time + (newer.wind_time - older.wind_time) * t;
             // A texture that scrolls moves its offset a little each frame;
             // a flipbook jumps to its next cell, and a wrap by the whole
             // texture: both are held.

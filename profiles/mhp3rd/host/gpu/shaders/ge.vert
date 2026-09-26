@@ -174,11 +174,24 @@ layout(location = 8) out vec3 frag_diffuse;  // the diffuse material
 
 layout(push_constant) uniform Push {
     mat4 transform;      // WVP, or identity for through vertices
-    vec4 viewport;       // xy: target size in PSP pixels, z: through, w: 1 fog + 2 lighting
+    vec4 viewport;       // xy: target size in PSP pixels (3D with wind: time, sway), z: through,
+                         // w: 1 fog + 2 lighting + 4 per pixel + 8 wind
     vec4 texture_params; // x: texture enabled, y: texture function, z: alpha ref, w: alpha func
     vec4 uv_transform;   // xy: scale, zw: offset
     vec4 view_z;         // row of view * world that gives view-space z
 } push;
+
+// Leaves, grass and cloth cut out of their quads sway in the wind: more the
+// higher they stand above their model's origin (where plants are rooted),
+// in gusts that roll across the model.
+vec3 swayed(vec3 position) {
+    float height = clamp(position.y / 90.0, 0.0, 1.6);
+    float t = push.viewport.x;
+    float phase = dot(position.xz, vec2(0.021, 0.013));
+    float gust = sin(t * 1.3 + phase) * 0.7 + sin(t * 3.7 + phase * 2.9) * 0.3;
+    float flutter = sin(t * 9.0 + dot(position, vec3(0.31, 0.17, 0.23))) * 0.25;
+    return position + vec3(1.0, 0.0, 0.55) * ((gust + flutter) * height * height * push.viewport.y);
+}
 
 // The lighting environment, shared by every draw until the game changes it;
 // the layout matches EnvironmentBlock on the host. Colours are 0..1; small
@@ -313,7 +326,8 @@ void main() {
         // which is negative in front of the camera: (z + end) * scale.
         if ((enables & 1) != 0)
             frag_fog = (dot(push.view_z, vec4(in_position.xyz, 1.0)) + lighting.fog.x) * lighting.fog.y;
-        vec4 clip = push.transform * vec4(in_position.xyz, 1.0);
+        vec3 position = (enables & 8) != 0 ? swayed(in_position.xyz) : in_position.xyz;
+        vec4 clip = push.transform * vec4(position, 1.0);
         // PSP clip space follows OpenGL with z in [-w, w]; Vulkan clips against
         // [0, w], so without this remap the near half of every frustum is lost.
         // The PSP viewport's z scale and offset are folded into the Vulkan
