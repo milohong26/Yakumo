@@ -50,6 +50,7 @@ struct Settings {
     bool sharp_textures{};             // nearest instead of linear texture sampling
     bool effects{true};                // remastered lighting and image effects (gpu/post_process.hpp)
     bool lighting{true};               // lit models shaded per pixel, with highlights and rim light
+    std::uint32_t look{1u};            // the effects' strength: 0 subtle, 1 remastered, 2 vivid
     bool texture_pack{true};           // draw an installed HD texture pack's images instead of the game's
     std::string texture_pack_folder;   // a pack used where it is instead of textures/<disc id>; empty: none
     bool unthrottled{};                // let emulated time run ahead of real time

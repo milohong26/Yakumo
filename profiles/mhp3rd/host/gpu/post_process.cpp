@@ -1390,6 +1390,35 @@ double Effects::take_gpu_ms(std::array<double, 6> *stages) {
     return ms;
 }
 
+Options options_for_look(Options options, std::uint32_t look) {
+    if (look == 1u) return options;
+    // How far towards the original each strength goes (subtle), or past it
+    // (vivid).
+    const float k = look == 0u ? 0.5f : 1.35f;
+    const auto towards = [&](float &value, float original) { value = original + (value - original) * k; };
+    towards(options.sun, 0.0f);
+    towards(options.shade, 1.0f);
+    options.shade = std::clamp(options.shade, 0.2f, 1.0f);
+    towards(options.contrast, 1.0f);
+    towards(options.saturation, 1.0f);
+    towards(options.vibrance, 0.0f);
+    towards(options.split_toning, 0.0f);
+    towards(options.bloom, 0.0f);
+    towards(options.light_bleed, 0.0f);
+    towards(options.rays, 0.0f);
+    towards(options.beams, 0.0f);
+    towards(options.clouds, 0.0f);
+    towards(options.bounce, 0.0f);
+    towards(options.relief, 0.0f);
+    towards(options.translucency, 0.0f);
+    towards(options.fog_tint, 0.0f);
+    towards(options.sky_gradient, 0.0f);
+    towards(options.ambient_occlusion, 0.0f);
+    towards(options.highlight, 0.0f);
+    towards(options.rim, 0.0f);
+    return options;
+}
+
 Options options_from_environment(Options options) {
     const char *text = std::getenv("MHP3RD_EFFECTS_OPTIONS");
     return text != nullptr ? options_from_text(options, text) : options;

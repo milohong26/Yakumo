@@ -6010,7 +6010,7 @@ void VulkanRenderer::begin_frame() {
             std::cout << "[effects] options from " << live_path << ": " << text << "\n" << std::flush;
         }
     }
-    impl.effect_options = effects_options;
+    impl.effect_options = post::options_for_look(effects_options, settings::current().look);
     impl.shadow_frame = impl.effects_frame && impl.fx().shadow_pipeline() != VK_NULL_HANDLE &&
                         impl.effect_options.sun > 0.0f;
 }

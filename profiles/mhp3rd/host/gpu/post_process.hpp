@@ -323,6 +323,8 @@ private:
 // highlight, gloss, rim, wrap, ground, knee, aa, sun, shade, elevation,
 // azimuth, range, debug).
 [[nodiscard]] Options options_from_environment(Options options);
+// The options scaled to a look: 0 subtle, 1 as they are, 2 vivid.
+[[nodiscard]] Options options_for_look(Options options, std::uint32_t look);
 // The same from `name=value` pairs separated by commas, semicolons, spaces
 // or lines (for MHP3RD_EFFECTS_LIVE, a file read again when it changes).
 [[nodiscard]] Options options_from_text(Options options, const std::string &text);

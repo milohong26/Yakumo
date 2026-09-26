@@ -318,6 +318,21 @@ void Menu::video() {
         s.lighting = !s.lighting;
         settings::save();
     }
+    {
+        static const char *const kLooks[] = {"Subtle", "Remastered", "Vivid"};
+        RowOptions o = options_for("video.look", "How strong the image effects are: Subtle keeps close to the "
+                                                 "original, Remastered is the full look, Vivid pushes the sun, "
+                                                 "shade and colour further.");
+        if (!s.effects) {
+            o.disabled = true;
+            o.note = "Image effects are off";
+        }
+        const std::uint32_t current = std::min<std::uint32_t>(s.look, 2u);
+        if (const int delta = choice_row("Look", kLooks[current], o)) {
+            s.look = static_cast<std::uint32_t>(cycle(static_cast<int>(current), delta, 3));
+            settings::save();
+        }
+    }
     if (choice_row("Image effects", s.effects ? "On" : "Off",
                    options_for("video.effects", "The sun's light and shadows, light shafts, water reflections, "
                                                 "ambient occlusion, bloom, edge smoothing and a colour grade on the "
@@ -463,6 +478,7 @@ void Menu::video() {
         restore("video.sharp_textures", s.sharp_textures, d.sharp_textures);
         restore("video.lighting", s.lighting, d.lighting);
         restore("video.effects", s.effects, d.effects);
+        restore("video.look", s.look, d.look);
         restore("video.texture_pack", s.texture_pack, d.texture_pack);
         restore("video.present_mode", s.present_mode, d.present_mode);
         restore("video.frame_rate", s.frame_rate, d.frame_rate);
