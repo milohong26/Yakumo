@@ -222,6 +222,7 @@ The game can be played with a keyboard and a mouse alone. Every control can be r
 | I / J / K / L | The second stick, fully | Camera without the mouse |
 | Esc | In-game menu | Frees the pointer |
 | F3 | Performance overlay on or off | |
+| F4 | Original or remastered lighting, to compare (a DualSense's touchpad click does the same) | Settings are left as they are |
 
 A bow aims with Left Shift held and shoots with the left button; a bowgun fires with the right one.
 
@@ -377,7 +378,7 @@ How the text is laid out, as traced with `MHP3RD_TRACE_FONT=1`: the game sizes a
 
 ## Lighting and effects
 
-Two settings in the Video section relight the game like a present-day remaster, or a shader pack. The difference is meant to be seen at a glance, but the game's own art, textures and baked lighting stay underneath. Both switch at the next frame; off draws the game exactly as before.
+Two settings in the Video section relight the game like a present-day remaster, or a shader pack. The difference is meant to be seen at a glance, but the game's own art, textures and baked lighting stay underneath. Both switch at the next frame; off draws the game exactly as before. F4, or a DualSense's touchpad click, flips between the original and the remastered look while playing, to compare, without changing the settings.
 
 - **Lighting: Remastered** shades lit models (hunters, monsters, items) per pixel instead of per vertex:
   - The game's own directional lights are evaluated at each pixel and wrap a little past the terminator.

@@ -1159,6 +1159,9 @@ struct VulkanRenderer::Impl {
     bool effects_ready{};
     bool effects_frame{};        // on for the frame being drawn
     bool per_pixel_frame{};      // lit draws lit per pixel in the frame being drawn
+    // F4 or a DualSense's touchpad click: the game as it was, for comparing,
+    // until pressed again (the settings stay as they are).
+    bool compare_original{};
     float wind_time{};           // the wind's clock for the frame being drawn (seconds)
     post::Options effect_options;
     struct SceneCamera {
@@ -5275,6 +5278,13 @@ bool VulkanRenderer::pump_events() {
         if (impl_->event_hook && impl_->event_hook(event)) continue;
         if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_F3 && !event.key.repeat && impl_->overlay_ready)
             impl_->overlay_visible = !impl_->overlay_visible;
+        if ((event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_F4 && !event.key.repeat) ||
+            (event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN && event.gbutton.button == SDL_GAMEPAD_BUTTON_TOUCHPAD)) {
+            impl_->compare_original = !impl_->compare_original;
+            std::cout << "[effects] " << (impl_->compare_original ? "original lighting (F4 or touchpad for remastered)"
+                                                                  : "remastered lighting")
+                      << "\n";
+        }
     }
     // Only sample while the window has focus: a key still down when focus is
     // lost stays down in SDL's snapshot, which the guest sees as a held
@@ -5917,8 +5927,8 @@ void VulkanRenderer::begin_frame() {
     impl.pass_active = false;
     impl.recording = true;
     impl.reset_scene();
-    impl.effects_frame = impl.effects_ready && settings::current().effects;
-    impl.per_pixel_frame = settings::current().lighting;
+    impl.effects_frame = impl.effects_ready && settings::current().effects && !impl.compare_original;
+    impl.per_pixel_frame = settings::current().lighting && !impl.compare_original;
     // MHP3RD_EFFECTS_DUMP: a file whose appearance dumps the next frame, or
     // @N to dump game frame N.
     static const char *dump = std::getenv("MHP3RD_EFFECTS_DUMP");
