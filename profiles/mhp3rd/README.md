@@ -401,7 +401,7 @@ Two settings in the Video section relight the game like a present-day remaster, 
     - the air lit by the sun, marched through the shadow map, brightest looking towards the sun;
     - beams from the bright sky around the sun through what stands against it (leaves, branches, far ridges): the sky blurred along the lines towards the sun's place on the screen.
   - **Water**: the game's water mirrors the scene and the sky.
-    - The water is found as the game draws it: large surfaces facing up, writing depth, with vertex alpha that is not all opaque. They are either blended and lit (the hot spring) or added (the village's streams); the scenery's unlit grass and dirt layers are left alone.
+    - The water is found as the game draws it: large surfaces facing up, writing depth, with vertex alpha that is not all opaque. They are blended and lit (the hot spring), added (the village's streams), or blended and blue or teal: the texture's average colour (measured when it is decoded) tinted by the vertices' (Misty Peaks' river, grey ripples on teal vertices), which may also slope as a river runs downhill. The scenery's green and brown grass and dirt layers are left alone.
     - Its draws are drawn again into a mask against the depth they wrote.
     - A half-resolution pass mirrors each water pixel's view about a surface rippled by moving waves and marches it through the scene; what it finds (or the sky's colour) is blended by the Fresnel term.
     - The sun glints on the water where its shadow map lets it reach, and the ripples focus its light into caustics on the shallow floor seen through it.

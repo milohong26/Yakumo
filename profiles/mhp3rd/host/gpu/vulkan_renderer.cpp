@@ -604,6 +604,7 @@ struct DecodeJob {
     std::int8_t cutout{-1};  // see cutout_of
     float share{};
     float flips{};
+    std::array<float, 3> average{1.0f, 1.0f, 1.0f};
     std::atomic<bool> done{};
 };
 
@@ -614,17 +615,30 @@ struct DecodeJob {
 // are opaque, and a carved rock's texture with a clear border flips rarely.
 // 1: cut out, 0: not.
 // `share` and `flips` get the transparent share and the flips per texel,
-// for MHP3RD_EFFECTS_DUMP.
-std::int8_t cutout_of(const std::vector<std::uint32_t> &pixels, float &share_out, float &flips_out) {
+// for MHP3RD_EFFECTS_DUMP; `average` the average colour of its visible
+// texels (0 to 1), for the water test.
+std::int8_t cutout_of(const std::vector<std::uint32_t> &pixels, float &share_out, float &flips_out,
+                      std::array<float, 3> &average) {
+    average = {1.0f, 1.0f, 1.0f};
     if (pixels.empty()) return 0;
     std::size_t clear = 0u, flips = 0u;
     bool before = (pixels[0] >> 24u) < 128u;
+    double red = 0.0, green = 0.0, blue = 0.0, seen = 0.0;
     for (const std::uint32_t pixel : pixels) {
         const bool now = (pixel >> 24u) < 128u;
         clear += now ? 1u : 0u;
         flips += now != before ? 1u : 0u;
         before = now;
+        if ((pixel >> 24u) >= 16u) {
+            red += pixel & 0xFFu;
+            green += (pixel >> 8u) & 0xFFu;
+            blue += (pixel >> 16u) & 0xFFu;
+            seen += 1.0;
+        }
     }
+    if (seen > 0.0)
+        average = {static_cast<float>(red / seen / 255.0), static_cast<float>(green / seen / 255.0),
+                   static_cast<float>(blue / seen / 255.0)};
     const double count = static_cast<double>(pixels.size());
     const double share = static_cast<double>(clear) / count;
     share_out = static_cast<float>(share);
@@ -674,7 +688,7 @@ public:
 private:
     void run(DecodeJob &job) {
         job.ok = decode_snapshot(job.snapshot, job.pixels);
-        if (job.ok) job.cutout = cutout_of(job.pixels, job.share, job.flips);
+        if (job.ok) job.cutout = cutout_of(job.pixels, job.share, job.flips, job.average);
         {
             std::lock_guard<std::mutex> guard(lock_);
             job.done.store(true, std::memory_order_release);
@@ -722,6 +736,7 @@ struct VulkanRenderer::Impl {
         std::shared_ptr<DecodeJob> job;  // the background decode, until its cutout is taken
         float share{};  // cutout_of's measures
         float flips{};
+        std::array<float, 3> average{1.0f, 1.0f, 1.0f};  // its visible texels' average colour
     };
     // The draw being submitted's bounds in the world, worked out once.
     const DrawCall *sphere_call{};
@@ -738,6 +753,7 @@ struct VulkanRenderer::Impl {
     bool last_texture_cutout{};  // texture_descriptor's texture is cut out
     float last_texture_share{};
     float last_texture_flips{};
+    std::array<float, 3> last_texture_average{1.0f, 1.0f, 1.0f};
 
     RendererConfig config;
     SDL_Window *window{};
@@ -3730,17 +3746,37 @@ void VulkanRenderer::Impl::apply_effects(std::uint32_t address) {
 // into their colours) or added to it (the village's streams, and the hot
 // spring's shimmer). Traced with MHP3RD_EFFECTS_DUMP; hiding the texture of
 // such draws (MHP3RD_HIDE_TEXTURES) takes the water away.
-bool looks_like_water(const DrawCall &call) {
-    const bool blended_lit = call.blend.destination_factor == 3u && call.lighting_enabled;
+bool looks_like_water(const DrawCall &call, const std::array<float, 3> &texture_average) {
+    // Blended and lit (the hot spring), or blended and blue or teal, its
+    // texture's average colour tinted by its vertices' (the rivers: grey
+    // ripples on teal vertices, unlit like the grass layers, which are
+    // green and brown).
+    bool watery = false;
+    if (call.blend.destination_factor == 3u && !call.lighting_enabled && !call.vertices.empty()) {
+        double red = 0.0, green = 0.0, blue = 0.0;
+        for (const Vertex &vertex : call.vertices) {
+            red += vertex.color & 0xFFu;
+            green += (vertex.color >> 8u) & 0xFFu;
+            blue += (vertex.color >> 16u) & 0xFFu;
+        }
+        red *= texture_average[0];
+        green *= texture_average[1];
+        blue *= texture_average[2];
+        watery = blue > red * 1.12 && blue + green > red * 2.3;
+    }
+    const bool blended_lit = call.blend.destination_factor == 3u && (call.lighting_enabled || watery);
     const bool added = call.blend.destination_factor == 10u;  // a fixed factor: one, for these
     if (call.through || call.clear_mode || !call.blend.enabled || !(blended_lit || added) ||
         !call.depth.write_enabled || !call.depth.test_enabled || !call.has_vertex_color || call.vertices.size() < 3u)
         return false;
+    // Blue or teal water may be opaque in places, small, and slope as a
+    // river runs downhill (not as steep as a waterfall); the rest is held to
+    // flat, large and see-through.
     std::uint32_t alpha_hi = 0u;
     for (const Vertex &vertex : call.vertices) alpha_hi = std::max(alpha_hi, vertex.color >> 24u);
-    if (alpha_hi >= 240u) return false;
+    if (alpha_hi >= 240u && !watery) return false;
     const WorldSphere sphere = world_sphere(call, true);
-    return sphere.known && sphere.up > 0.97f && sphere.radius > 100.0f;
+    return sphere.known && sphere.up > (watery ? 0.8f : 0.97f) && sphere.radius > (watery ? 30.0f : 100.0f);
 }
 
 // A draw of the scene that casts the sun's shadows: solid (or cut out by
@@ -4458,7 +4494,7 @@ VulkanRenderer::Impl::Texture &VulkanRenderer::Impl::texture_for(const GuestMemo
                           : create_texture(state.width, state.height, pixels.data());
     if (texture.descriptor == VK_NULL_HANDLE) return white_texture;
     if (job) texture.job = job;
-    else texture.cutout = cutout_of(pixels, texture.share, texture.flips);
+    else texture.cutout = cutout_of(pixels, texture.share, texture.flips, texture.average);
     if (job) {
         if (!decode_pool) {
             const std::uint32_t cores = std::max(1u, std::thread::hardware_concurrency());
@@ -4484,11 +4520,13 @@ VkDescriptorSet VulkanRenderer::Impl::texture_descriptor(const GuestMemory &memo
         texture.cutout = texture.job->ok ? texture.job->cutout : 0;
         texture.share = texture.job->share;
         texture.flips = texture.job->flips;
+        texture.average = texture.job->average;
         texture.job.reset();
     }
     last_texture_cutout = texture.cutout == 1;
     last_texture_share = texture.share;
     last_texture_flips = texture.flips;
+    last_texture_average = texture.average;
     if (texture.replacement && pack) {
         // Until the image is decoded and on the GPU, the original is drawn.
         if (const VkDescriptorSet replaced = replacements.descriptor(*texture.replacement, *pack, frames)) {
@@ -6128,11 +6166,7 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     static const bool no_lighting = std::getenv("MHP3RD_NO_LIGHTING") != nullptr;
     static const bool no_fog = no_lighting || std::getenv("MHP3RD_NO_FOG") != nullptr;
     const bool lit = call.lighting_enabled && !no_lighting && !call.through && !call.clear_mode;
-    // The scene's water, for the reflections, and its foliage (unlit and cut
-    // out by alpha: leaves, grass tufts, banners), which sways in the wind
-    // and lets the sun through.
-    const bool water = impl.effects_frame && !raw && !call.through && looks_like_water(call);
-    impl.current_draw_water = water;
+
     // Lit per pixel: opaque and alpha-blended models, not the additive glows
     // a highlight or rim would only brighten further.
     const bool per_pixel = lit && impl.per_pixel_frame &&
@@ -6752,6 +6786,7 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
 
     VkDescriptorSet texture_descriptor = impl.white_texture.descriptor;
     bool texture_cutout = false;
+    std::array<float, 3> texture_average{1.0f, 1.0f, 1.0f};
     if (call.texture.enabled && !call.clear_mode) {
         const Impl::FramebufferTexture &source = framebuffer_source;
         const VkDescriptorSet copy =
@@ -6773,8 +6808,12 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
         } else {
             texture_descriptor = impl.texture_descriptor(memory, call);
             texture_cutout = impl.last_texture_cutout;
+            texture_average = impl.last_texture_average;
         }
     }
+    // The scene's water, for the reflections.
+    const bool water = impl.effects_frame && !raw && !call.through && looks_like_water(call, texture_average);
+    impl.current_draw_water = water;
     // The scenery's foliage: unlit, alpha tested, with a texture cut out by
     // its alpha (leaves, grass tufts, banners). It sways in the wind and
     // lets the sun through.
@@ -6786,10 +6825,12 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
                          !interpolation::is_orthographic(call.projection) && impl.sphere_of(call).radius < 3500.0f;
     impl.current_draw_foliage = foliage;
     if (impl.dump_frame && call.texture.enabled && !call.through)
-        std::printf("[dump] texture 0x%08X %ux%u cutout %d (clear %.2f flips %.3f) alpha test %d func %u ref %u lit %d "
-                    "r %.0f%s\n",
+        std::printf("[dump] texture 0x%08X %ux%u cutout %d (clear %.2f flips %.3f) colour %.2f %.2f %.2f water %d "
+                    "alpha test %d func %u ref %u lit %d r %.0f%s\n",
                     call.texture.address, call.texture.width, call.texture.height, texture_cutout ? 1 : 0,
                     static_cast<double>(impl.last_texture_share), static_cast<double>(impl.last_texture_flips),
+                    static_cast<double>(impl.last_texture_average[0]), static_cast<double>(impl.last_texture_average[1]),
+                    static_cast<double>(impl.last_texture_average[2]), water ? 1 : 0,
                     call.alpha_test.enabled ? 1 : 0, call.alpha_test.function, call.alpha_test.reference,
                     call.lighting_enabled ? 1 : 0, static_cast<double>(impl.sphere_of(call).radius),
                     foliage ? " foliage" : "");
@@ -6835,6 +6876,16 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
         }
         const WorldSphere sphere = world_sphere(call, true);
         const std::array<float, 3> eye = camera_position(call.view);
+        // Where the draw's centre falls on the screen, 0 to 1.
+        std::array<double, 2> screen{-1.0, -1.0};
+        if (!call.through && sphere.known) {
+            const auto clip_of = multiply(call.projection, call.view);
+            const auto &c = sphere.centre;
+            const float cx = clip_of[0] * c[0] + clip_of[4] * c[1] + clip_of[8] * c[2] + clip_of[12];
+            const float cy = clip_of[1] * c[0] + clip_of[5] * c[1] + clip_of[9] * c[2] + clip_of[13];
+            const float cw = clip_of[3] * c[0] + clip_of[7] * c[1] + clip_of[11] * c[2] + clip_of[15];
+            if (cw > 1e-3f) screen = {0.5 + 0.5 * cx / cw, 0.5 - 0.5 * cy / cw};
+        }
         std::uint32_t alpha_lo = 255u, alpha_hi = 0u;
         for (const Vertex &vertex : call.vertices) {
             alpha_lo = std::min(alpha_lo, vertex.color >> 24u);
@@ -6842,7 +6893,7 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
         }
         const float ex = sphere.centre[0] - eye[0], ey = sphere.centre[1] - eye[1], ez = sphere.centre[2] - eye[2];
         std::printf("[dump] %4u %s target 0x%08X%s verts %zu %s tex %s 0x%08X%s blend %s %u/%u depth %s%s ortho %d "
-                    "fog %d r %.0f d %.0f up %.2f y %.0f lit %d alpha %u-%u vc %d fn %u %s%s\n",
+                    "fog %d r %.0f d %.0f up %.2f y %.0f lit %d alpha %u-%u vc %d fn %u scr %.2f,%.2f %s%s\n",
                     impl.dump_index++, call.clear_mode ? "CLEAR" : call.through ? "2D   " : "3D   ",
                     call.target.color_address, impl.shows(call.target.color_address) ? " shown" : "      ",
                     call.vertices.size(),
@@ -6857,7 +6908,8 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
                     call.fog.enabled ? 1 : 0, static_cast<double>(sphere.radius),
                     static_cast<double>(std::sqrt(ex * ex + ey * ey + ez * ez)), static_cast<double>(sphere.up),
                     static_cast<double>(sphere.centre[1]), call.lighting_enabled ? 1 : 0, alpha_lo, alpha_hi,
-                    call.has_vertex_color ? 1 : 0, call.texture.function, impl.effects_applied ? "fx-done" : "", "");
+                    call.has_vertex_color ? 1 : 0, call.texture.function, screen[0], screen[1],
+                    impl.effects_applied ? "fx-done" : "", "");
     }
 
     if (!impl.pass_active || impl.current_target != call.target.color_address) {
