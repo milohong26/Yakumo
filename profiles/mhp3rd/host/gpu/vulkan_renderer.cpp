@@ -376,6 +376,59 @@ std::array<float, 3> camera_position(const std::array<float, 16> &view) {
     return eye;
 }
 
+// A draw's vertices as a sphere in the world: the centre of their box and
+// the distance to its corners, through the world matrix (its largest scale).
+struct WorldSphere {
+    std::array<float, 3> centre{};
+    float radius{};
+    bool known{};
+    float up{};  // how far the draw's surfaces face up in the world, area-weighted: -1 to 1
+};
+// `facing`: also how far its surfaces face up (the water test's; it walks
+// every triangle).
+WorldSphere world_sphere(const DrawCall &call, bool facing = false) {
+    WorldSphere sphere{};
+    if (call.vertices.empty()) return sphere;
+    std::array<float, 3> lo{1e30f, 1e30f, 1e30f}, hi{-1e30f, -1e30f, -1e30f};
+    for (const Vertex &vertex : call.vertices)
+        for (int axis = 0; axis < 3; ++axis) {
+            lo[axis] = std::min(lo[axis], vertex.position[axis]);
+            hi[axis] = std::max(hi[axis], vertex.position[axis]);
+        }
+    const std::array<float, 16> &w = call.world;
+    const std::array<float, 3> mid{(lo[0] + hi[0]) * 0.5f, (lo[1] + hi[1]) * 0.5f, (lo[2] + hi[2]) * 0.5f};
+    for (int row = 0; row < 3; ++row)
+        sphere.centre[row] = w[row] * mid[0] + w[4 + row] * mid[1] + w[8 + row] * mid[2] + w[12 + row];
+    float scale = 0.0f;
+    for (int column = 0; column < 3; ++column)
+        scale = std::max(scale, std::sqrt(w[column * 4] * w[column * 4] + w[column * 4 + 1] * w[column * 4 + 1] +
+                                          w[column * 4 + 2] * w[column * 4 + 2]));
+    const float dx = hi[0] - mid[0], dy = hi[1] - mid[1], dz = hi[2] - mid[2];
+    sphere.radius = std::sqrt(dx * dx + dy * dy + dz * dz) * scale;
+    sphere.known = true;
+    if (!facing) return sphere;
+    // The surfaces' facing, from the triangles as a list or a strip.
+    const auto world_at = [&](const Vertex &v) {
+        return std::array<float, 3>{w[0] * v.position[0] + w[4] * v.position[1] + w[8] * v.position[2],
+                                    w[1] * v.position[0] + w[5] * v.position[1] + w[9] * v.position[2],
+                                    w[2] * v.position[0] + w[6] * v.position[1] + w[10] * v.position[2]};
+    };
+    float up = 0.0f, area = 0.0f;
+    const bool strip = call.primitive == PrimitiveType::TriangleStrip;
+    const std::size_t count = call.vertices.size();
+    for (std::size_t i = 0; i + 2 < count; i += strip ? 1u : 3u) {
+        const auto a = world_at(call.vertices[i]), b = world_at(call.vertices[i + 1]), c = world_at(call.vertices[i + 2]);
+        const std::array<float, 3> e1{b[0] - a[0], b[1] - a[1], b[2] - a[2]}, e2{c[0] - a[0], c[1] - a[1], c[2] - a[2]};
+        const std::array<float, 3> n{e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2],
+                                     e1[0] * e2[1] - e1[1] * e2[0]};
+        const float length = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+        up += std::fabs(n[1]);
+        area += length;
+    }
+    sphere.up = area > 0.0f ? up / area : 0.0f;
+    return sphere;
+}
+
 bool check(VkResult result, const char *what, std::string &error) {
     if (result == VK_SUCCESS) return true;
     error = std::string(what) + " failed with VkResult " + std::to_string(static_cast<int>(result));
@@ -670,6 +723,18 @@ struct VulkanRenderer::Impl {
         float share{};  // cutout_of's measures
         float flips{};
     };
+    // The draw being submitted's bounds in the world, worked out once.
+    const DrawCall *sphere_call{};
+    std::uint64_t sphere_draw{~std::uint64_t{0}};
+    WorldSphere sphere_cache{};
+    const WorldSphere &sphere_of(const DrawCall &call) {
+        if (sphere_call != &call || sphere_draw != draws) {
+            sphere_cache = world_sphere(call);
+            sphere_call = &call;
+            sphere_draw = draws;
+        }
+        return sphere_cache;
+    }
     bool last_texture_cutout{};  // texture_descriptor's texture is cut out
     float last_texture_share{};
     float last_texture_flips{};
@@ -3647,55 +3712,6 @@ void VulkanRenderer::Impl::apply_effects(std::uint32_t address) {
     target.draw_serial = ++target_draw_counter;
 }
 
-// A draw's vertices as a sphere in the world: the centre of their box and
-// the distance to its corners, through the world matrix (its largest scale).
-struct WorldSphere {
-    std::array<float, 3> centre{};
-    float radius{};
-    bool known{};
-    float up{};  // how far the draw's surfaces face up in the world, area-weighted: -1 to 1
-};
-WorldSphere world_sphere(const DrawCall &call) {
-    WorldSphere sphere{};
-    if (call.vertices.empty()) return sphere;
-    std::array<float, 3> lo{1e30f, 1e30f, 1e30f}, hi{-1e30f, -1e30f, -1e30f};
-    for (const Vertex &vertex : call.vertices)
-        for (int axis = 0; axis < 3; ++axis) {
-            lo[axis] = std::min(lo[axis], vertex.position[axis]);
-            hi[axis] = std::max(hi[axis], vertex.position[axis]);
-        }
-    const std::array<float, 16> &w = call.world;
-    const std::array<float, 3> mid{(lo[0] + hi[0]) * 0.5f, (lo[1] + hi[1]) * 0.5f, (lo[2] + hi[2]) * 0.5f};
-    for (int row = 0; row < 3; ++row)
-        sphere.centre[row] = w[row] * mid[0] + w[4 + row] * mid[1] + w[8 + row] * mid[2] + w[12 + row];
-    float scale = 0.0f;
-    for (int column = 0; column < 3; ++column)
-        scale = std::max(scale, std::sqrt(w[column * 4] * w[column * 4] + w[column * 4 + 1] * w[column * 4 + 1] +
-                                          w[column * 4 + 2] * w[column * 4 + 2]));
-    const float dx = hi[0] - mid[0], dy = hi[1] - mid[1], dz = hi[2] - mid[2];
-    sphere.radius = std::sqrt(dx * dx + dy * dy + dz * dz) * scale;
-    sphere.known = true;
-    // The surfaces' facing, from the triangles as a list or a strip.
-    const auto world_at = [&](const Vertex &v) {
-        return std::array<float, 3>{w[0] * v.position[0] + w[4] * v.position[1] + w[8] * v.position[2],
-                                    w[1] * v.position[0] + w[5] * v.position[1] + w[9] * v.position[2],
-                                    w[2] * v.position[0] + w[6] * v.position[1] + w[10] * v.position[2]};
-    };
-    float up = 0.0f, area = 0.0f;
-    const bool strip = call.primitive == PrimitiveType::TriangleStrip;
-    const std::size_t count = call.vertices.size();
-    for (std::size_t i = 0; i + 2 < count; i += strip ? 1u : 3u) {
-        const auto a = world_at(call.vertices[i]), b = world_at(call.vertices[i + 1]), c = world_at(call.vertices[i + 2]);
-        const std::array<float, 3> e1{b[0] - a[0], b[1] - a[1], b[2] - a[2]}, e2{c[0] - a[0], c[1] - a[1], c[2] - a[2]};
-        const std::array<float, 3> n{e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2],
-                                     e1[0] * e2[1] - e1[1] * e2[0]};
-        const float length = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
-        up += std::fabs(n[1]);
-        area += length;
-    }
-    sphere.up = area > 0.0f ? up / area : 0.0f;
-    return sphere;
-}
 
 // The game's water, as it draws it: large, flat surfaces facing up, writing
 // depth, with vertex alpha that is not all opaque, either blended over what
@@ -3713,7 +3729,7 @@ bool looks_like_water(const DrawCall &call) {
     std::uint32_t alpha_hi = 0u;
     for (const Vertex &vertex : call.vertices) alpha_hi = std::max(alpha_hi, vertex.color >> 24u);
     if (alpha_hi >= 240u) return false;
-    const WorldSphere sphere = world_sphere(call);
+    const WorldSphere sphere = world_sphere(call, true);
     return sphere.known && sphere.up > 0.97f && sphere.radius > 100.0f;
 }
 
@@ -3731,7 +3747,7 @@ void VulkanRenderer::Impl::note_shadow_caster(const DrawCall &call, VkDescriptor
     if (call.blend.enabled && call.blend.destination_factor != 3u) return;
     // Nor does the sky: a dome (or box) around the camera, far larger than
     // anything that casts a shadow, would shadow the whole scene.
-    const WorldSphere sphere = world_sphere(call);
+    const WorldSphere &sphere = sphere_of(call);
     if (sphere.known && sphere.radius > 3000.0f) {
         const std::array<float, 3> eye = camera_position(call.view);
         const float dx = sphere.centre[0] - eye[0], dy = sphere.centre[1] - eye[1], dz = sphere.centre[2] - eye[2];
@@ -3818,7 +3834,7 @@ void VulkanRenderer::Impl::note_water(const DrawCall &call, bool water, bool fol
     // Foliage only as far as the sun's light reaches in the composite (a
     // little past the shadow map), not the leaves painted on far hills.
     if (foliage && !water) {
-        const WorldSphere sphere = world_sphere(call);
+        const WorldSphere &sphere = sphere_of(call);
         const std::array<float, 3> eye = camera_position(call.view);
         const float dx = sphere.centre[0] - eye[0], dy = sphere.centre[1] - eye[1], dz = sphere.centre[2] - eye[2];
         if (std::sqrt(dx * dx + dy * dy + dz * dz) - sphere.radius > effect_options.shadow_range * 2.2f) return;
@@ -6723,7 +6739,7 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     const bool foliage = impl.effects_frame && texture_cutout && !call.through && !call.clear_mode && !raw &&
                          !call.lighting_enabled && call.alpha_test.enabled &&
                          (call.alpha_test.function == 6u || call.alpha_test.function == 7u) &&
-                         !interpolation::is_orthographic(call.projection) && world_sphere(call).radius < 3500.0f;
+                         !interpolation::is_orthographic(call.projection) && impl.sphere_of(call).radius < 3500.0f;
     impl.current_draw_foliage = foliage;
     if (impl.dump_frame && call.texture.enabled && !call.through)
         std::printf("[dump] texture 0x%08X %ux%u cutout %d (clear %.2f flips %.3f) alpha test %d func %u ref %u lit %d "
@@ -6731,7 +6747,7 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
                     call.texture.address, call.texture.width, call.texture.height, texture_cutout ? 1 : 0,
                     static_cast<double>(impl.last_texture_share), static_cast<double>(impl.last_texture_flips),
                     call.alpha_test.enabled ? 1 : 0, call.alpha_test.function, call.alpha_test.reference,
-                    call.lighting_enabled ? 1 : 0, static_cast<double>(world_sphere(call).radius),
+                    call.lighting_enabled ? 1 : 0, static_cast<double>(impl.sphere_of(call).radius),
                     foliage ? " foliage" : "");
     if (foliage && impl.effect_options.wind > 0.0f) {
         push.viewport[0] = impl.wind_time;
@@ -6773,7 +6789,7 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
             r = std::max(r, vertex.position[0]);
             b = std::max(b, vertex.position[1]);
         }
-        const WorldSphere sphere = world_sphere(call);
+        const WorldSphere sphere = world_sphere(call, true);
         const std::array<float, 3> eye = camera_position(call.view);
         std::uint32_t alpha_lo = 255u, alpha_hi = 0u;
         for (const Vertex &vertex : call.vertices) {
