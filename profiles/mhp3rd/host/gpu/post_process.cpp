@@ -120,6 +120,7 @@ struct SunBlock {
     float view_to_world[16];
     float water[4];
     float clouds[4];
+    float bounce[4];
 };
 
 } // namespace
@@ -305,9 +306,9 @@ bool Effects::create(VkDevice device, VkPhysicalDevice physical_device, VkPipeli
     if (!check(vkCreateSampler(device_, &sampler, nullptr, &shadow_sampler_), "vkCreateSampler (effects)", error))
         return false;
 
-    // Bindings 0-4, 7, 8, 10 and 11: the pass's images; 5: the shadow map,
-    // compared; 6: the sun; 9: the shadow map's depths.
-    std::array<VkDescriptorSetLayoutBinding, 12> bindings{};
+    // Bindings 0-4, 7, 8, 10, 11 and 12: the pass's images; 5: the shadow
+    // map, compared; 6: the sun; 9: the shadow map's depths.
+    std::array<VkDescriptorSetLayoutBinding, 13> bindings{};
     for (std::uint32_t i = 0; i < bindings.size(); ++i) {
         bindings[i].binding = i;
         bindings[i].descriptorType =
@@ -348,7 +349,8 @@ bool Effects::create(VkDevice device, VkPhysicalDevice physical_device, VkPipeli
         !make_pipeline(kPostCompositeShader, sizeof(kPostCompositeShader), pass_target_, composite_pipeline_, error) ||
         !make_pipeline(kPostRaysShader, sizeof(kPostRaysShader), pass_rg16f_, rays_pipeline_, error) ||
         !make_pipeline(kPostAverageShader, sizeof(kPostAverageShader), pass_average_, average_pipeline_, error) ||
-        !make_pipeline(kPostReflectShader, sizeof(kPostReflectShader), pass_average_, reflect_pipeline_, error))
+        !make_pipeline(kPostReflectShader, sizeof(kPostReflectShader), pass_average_, reflect_pipeline_, error) ||
+        !make_pipeline(kPostBounceShader, sizeof(kPostBounceShader), pass_average_, bounce_pipeline_, error))
         return false;
     if (!make_shadow_resources(error)) return false;
     ready_ = true;
@@ -800,6 +802,7 @@ void Effects::write_sun(const Camera &camera, const Options &options) {
     block.clouds[1] = std::clamp(options.cloud_cover, 0.0f, 1.0f);
     block.clouds[2] = std::max(options.cloud_size, 100.0f);
     block.clouds[3] = options.light_bleed;
+    block.bounce[0] = options.bounce;
     const std::uint32_t slot = sun_next_++ % kSunSlots;
     sun_offset_ = static_cast<std::uint32_t>(slot * sun_stride_);
     std::memcpy(static_cast<std::uint8_t *>(sun_mapped_) + sun_offset_, &block, sizeof(block));
@@ -858,7 +861,7 @@ void Effects::destroy_image(Image &image) {
 
 VkDescriptorSet Effects::make_set(std::array<VkImageView, kImageBindings> views,
                                   std::array<bool, kImageBindings> linear) {
-    constexpr std::array<std::uint32_t, kImageBindings> kBinding{0u, 1u, 2u, 3u, 4u, 7u, 8u, 10u, 11u};
+    constexpr std::array<std::uint32_t, kImageBindings> kBinding{0u, 1u, 2u, 3u, 4u, 7u, 8u, 10u, 11u, 12u};
     VkDescriptorSetAllocateInfo allocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     allocate.descriptorPool = pool_;
     allocate.descriptorSetCount = 1u;
@@ -918,6 +921,8 @@ bool Effects::resize(VkExtent2D extent, VkFormat depth_format, std::string &erro
         !make_image(water_mask_, extent, VK_FORMAT_R8_UNORM, kDrawn, VK_IMAGE_ASPECT_COLOR_BIT, VK_NULL_HANDLE,
                     error) ||
         !make_image(reflection_, half, VK_FORMAT_R16G16B16A16_SFLOAT, kDrawn, VK_IMAGE_ASPECT_COLOR_BIT,
+                    pass_average_, error) ||
+        !make_image(bounce_, half_of(extent, 2), VK_FORMAT_R16G16B16A16_SFLOAT, kDrawn, VK_IMAGE_ASPECT_COLOR_BIT,
                     pass_average_, error)) {
         destroy_sized();
         return false;
@@ -931,7 +936,7 @@ bool Effects::resize(VkExtent2D extent, VkFormat depth_format, std::string &erro
         }
     }
     const std::array<VkDescriptorPoolSize, 2> sizes{
-        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 11u * 32u},
+        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 12u * 32u},
         VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 32u}};
     VkDescriptorPoolCreateInfo pool{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     pool.maxSets = 32u;
@@ -951,8 +956,9 @@ bool Effects::resize(VkExtent2D extent, VkFormat depth_format, std::string &erro
         up_sets_[i] = make_set({i == kBloomLevels - 1 ? down_[i].view : up_[i + 1].view, down_[i].view}, {L, L});
     }
     composite_set_ = make_set({scene_color_.view, scene_depth_.view, distances_.view, visibility_b_.view, up_[0].view,
-                               rays_.view, average_.view, water_mask_.view, reflection_.view},
-                              {L, N, N, L, L, L, N, N, L});
+                               rays_.view, average_.view, water_mask_.view, reflection_.view, bounce_.view},
+                              {L, N, N, L, L, L, N, N, L, L});
+    bounce_set_ = make_set({scene_color_.view, visibility_b_.view, distances_.view}, {L, L, N});
     rays_set_ = make_set({distances_.view}, {N});
     average_set_ = make_set({visibility_b_.view, distances_.view, scene_color_.view}, {N, N, N});
     reflect_set_ = make_set({distances_.view, scene_color_.view, water_mask_.view}, {N, L, L});
@@ -982,7 +988,7 @@ void Effects::prime(VkCommandBuffer commands) {
     primed_ = true;
     std::vector<std::pair<Image *, float>> images{
         {&distances_, 1.0e6f}, {&visibility_a_, 1.0f}, {&visibility_b_, 1.0f}, {&rays_, 0.0f}, {&average_, 1.0f},
-        {&water_mask_, 0.0f},  {&reflection_, 0.0f}};
+        {&water_mask_, 0.0f},  {&reflection_, 0.0f}, {&bounce_, 0.0f}};
     for (Image &image : down_) images.push_back({&image, 0.0f});
     for (Image &image : up_) images.push_back({&image, 0.0f});
     for (const auto &[image, value] : images) {
@@ -1014,6 +1020,7 @@ void Effects::destroy_sized() {
     destroy_image(average_);
     destroy_image(water_mask_);
     destroy_image(reflection_);
+    destroy_image(bounce_);
     for (auto &[view, framebuffer] : water_framebuffers_) vkDestroyFramebuffer(device_, framebuffer, nullptr);
     water_framebuffers_.clear();
     for (Image &image : down_) destroy_image(image);
@@ -1025,7 +1032,7 @@ void Effects::destroy() {
     destroy_sized();
     for (VkPipeline pipeline :
          {depth_pipeline_, ao_pipeline_, blur_pipeline_, down_pipeline_, up_pipeline_, composite_pipeline_,
-          rays_pipeline_, average_pipeline_, reflect_pipeline_, water_pipeline_})
+          rays_pipeline_, average_pipeline_, reflect_pipeline_, water_pipeline_, bounce_pipeline_})
         vkDestroyPipeline(device_, pipeline, nullptr);
     for (VkRenderPass pass : {pass_r32f_, pass_rg16f_, pass_rgba16f_, pass_target_, pass_average_})
         vkDestroyRenderPass(device_, pass, nullptr);
@@ -1052,7 +1059,7 @@ void Effects::destroy() {
     timer_ = VK_NULL_HANDLE;
     timer_next_ = 0u;
     depth_pipeline_ = ao_pipeline_ = blur_pipeline_ = down_pipeline_ = up_pipeline_ = composite_pipeline_ = {};
-    rays_pipeline_ = average_pipeline_ = reflect_pipeline_ = water_pipeline_ = VK_NULL_HANDLE;
+    rays_pipeline_ = average_pipeline_ = reflect_pipeline_ = water_pipeline_ = bounce_pipeline_ = VK_NULL_HANDLE;
     vkDestroyRenderPass(device_, water_pass_, nullptr);
     water_pass_ = VK_NULL_HANDLE;
     pass_r32f_ = pass_rg16f_ = pass_rgba16f_ = pass_target_ = pass_average_ = {};
@@ -1223,6 +1230,14 @@ void Effects::record(VkCommandBuffer commands, VkImage color, VkImageView color_
         if (options.sun > 0.0f && bloom)
             run(commands, pass_average_, average_.framebuffer, average_.extent, average_pipeline_, average_set_, params);
     }
+    // Bounced light is soft: the frames interpolated between the game's keep
+    // the game frame's.
+    if (options.bounce > 0.0f && options.sun > 0.0f && bloom) {
+        Params gather = params;
+        // About a hunter's height, in the screen's height at distance 1.
+        gather.a[0] = 120.0f * std::abs(m[5]) * 0.5f;
+        run(commands, pass_average_, bounce_.framebuffer, bounce_.extent, bounce_pipeline_, bounce_set_, gather);
+    }
     if (water_this_frame_ && options.water > 0.0f)
         run(commands, pass_average_, reflection_.framebuffer, reflection_.extent, reflect_pipeline_, reflect_set_,
             params);
@@ -1378,6 +1393,7 @@ Options options_from_text(Options options, const std::string &text) {
         else if (name == "cover") options.cloud_cover = value;
         else if (name == "cloudsize") options.cloud_size = value;
         else if (name == "bleed") options.light_bleed = value;
+        else if (name == "bounce") options.bounce = value;
         else if (name == "reach") options.rays_reach = value;
         else if (name == "debug") options.debug = static_cast<int>(value);
     }

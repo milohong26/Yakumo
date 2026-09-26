@@ -107,6 +107,9 @@ struct Options {
     // Bright light (fires, lanterns, the sun on white stone) lighting the
     // surfaces around it through the bloom's spread light. 0 turns it off.
     float light_bleed{0.5f};
+    // Sunlight bounced off the surfaces it lights onto those around them,
+    // most into the shade. 0 turns it off.
+    float bounce{0.6f};
     float rays_g{0.7f};  // how much the air scatters forward, towards the sun (Henyey-Greenstein g)
     float rays_reach{2600.0f};  // how far along a view ray the air is seen, in the game's units
     int debug{};  // 1 occlusion, 2 contact shadows, 3 distance, 4 bloom
@@ -187,9 +190,9 @@ private:
     bool make_pass(VkFormat format, bool keep_target, VkRenderPass &pass, std::string &error);
     bool make_pipeline(const std::uint32_t *fragment, std::size_t bytes, VkRenderPass pass, VkPipeline &pipeline,
                        std::string &error);
-    // Views for bindings 0-4, 7, 8, 10 and 11 (views[5] to views[8]); null
-    // takes a stand-in.
-    static constexpr std::size_t kImageBindings = 9u;
+    // Views for bindings 0-4, 7, 8, 10, 11 and 12 (views[5] to views[9]);
+    // null takes a stand-in.
+    static constexpr std::size_t kImageBindings = 10u;
     VkDescriptorSet make_set(std::array<VkImageView, kImageBindings> views, std::array<bool, kImageBindings> linear);
     void write_sun(const Camera &camera, const Options &options);
     bool make_shadow_resources(std::string &error);
@@ -226,6 +229,7 @@ private:
     VkPipeline rays_pipeline_{};
     VkPipeline average_pipeline_{};
     VkPipeline reflect_pipeline_{};
+    VkPipeline bounce_pipeline_{};
 
     // Bloom from a quarter of the target's size down, in three levels.
     static constexpr int kBloomLevels = 3;
@@ -238,6 +242,7 @@ private:
     Image average_;  // 1x1: how much of the scene the sun reaches
     Image water_mask_;   // full resolution: how much of each pixel is water
     Image reflection_;   // half resolution: the water's reflection
+    Image bounce_;       // a quarter of the target: sunlight bounced off what it lights
     std::array<Image, kBloomLevels> down_{};
     std::array<Image, kBloomLevels> up_{};
     VkDescriptorPool pool_{};
@@ -250,6 +255,7 @@ private:
     VkDescriptorSet rays_set_{};
     VkDescriptorSet average_set_{};
     VkDescriptorSet reflect_set_{};
+    VkDescriptorSet bounce_set_{};
 
     // The water mask's pass (on each target's depth) and pipeline.
     VkRenderPass water_pass_{};

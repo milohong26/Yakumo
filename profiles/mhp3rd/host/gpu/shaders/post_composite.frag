@@ -30,6 +30,7 @@ layout(set = 0, binding = 7) uniform sampler2D rays;       // quarter resolution
 layout(set = 0, binding = 8) uniform sampler2D average;    // 1x1: rgb the sky's colour, a how much the sun reaches
 layout(set = 0, binding = 10) uniform sampler2D water_mask; // full resolution: how much of the pixel is water
 layout(set = 0, binding = 11) uniform sampler2D reflection; // half resolution: rgb the reflection, a how sure
+layout(set = 0, binding = 12) uniform sampler2D bounce;     // quarter resolution: sunlight bounced off what it lights
 layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 out_color;
 
@@ -275,7 +276,12 @@ void main() {
         float sky_luma = luminance(around.rgb);
         vec3 tint = sky_luma > 0.02 ? mix(sun.shade.rgb, around.rgb / sky_luma, 0.5) : sun.shade.rgb;
         vec3 shaded = tint * mix(1.0 - (1.0 - sun.shade.w) * 0.35, sun.shade.w, adapted);
+        vec3 albedo = color;
         color *= mix(vec3(1.0), mix(shaded, lit, vis.y), clear * near);
+        // Sunlight bounced off the lit surfaces around, most where the sun
+        // itself does not reach.
+        vec3 bounced = texture(bounce, uv).rgb * sun.color.rgb * sun.color.w;
+        color += albedo * bounced * (sun.bounce.x * (1.0 - 0.6 * vis.y) * clear * near);
     }
     vec3 glow = texture(bloom, uv).rgb;
     // Bright light lights what is around it, too: the bloom's spread light
