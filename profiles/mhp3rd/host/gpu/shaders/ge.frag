@@ -76,7 +76,10 @@ Lit light_pixel() {
     lit.diffuse = frag_color.rgb + frag_ambient * mix(ground, 2.0 - ground, up);
     lit.specular = vec3(0.0);
     vec3 sky = vec3(0.0);
+    vec3 back = vec3(0.0);
     float lights = 0.0;
+    float grazing_edge = 1.0 - max(dot(n, v), 0.0);
+    float edge3 = grazing_edge * grazing_edge * grazing_edge;
     for (int i = 0; i < 4; ++i) {
         if (lighting.light_position[i].w < 0.5 || int(lighting.light_direction[i].w + 0.5) != 0) continue;
         vec3 l = lighting.light_position[i].xyz;
@@ -93,6 +96,10 @@ Lit light_pixel() {
             lit.specular += color * (fresnel * (power + 8.0) / 8.0 * pow(max(dot(n, h), 0.0), power) * n_dot_l);
         }
         sky += color;
+        // A light behind the model, as the camera sees it, outlines its
+        // silhouette (a back light's rim).
+        float behind = max(dot(-v, l), 0.0);
+        back += color * (edge3 * behind * behind);
         lights += 1.0;
     }
     // The GE clamps light at 1, so wherever two of its lights meet a model
@@ -109,7 +116,8 @@ Lit light_pixel() {
     lit.specular *= object.enhance.x;
     float grazing = 1.0 - max(dot(n, v), 0.0);
     grazing *= grazing;
-    lit.rim = sky / max(lights, 1.0) * (grazing * grazing * object.enhance.y * (0.35 + 0.65 * up));
+    lit.rim = sky / max(lights, 1.0) * (grazing * grazing * object.enhance.y * (0.35 + 0.65 * up)) +
+              back * (object.enhance.y * 1.4);
     return lit;
 }
 

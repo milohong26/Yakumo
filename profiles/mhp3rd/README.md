@@ -383,7 +383,7 @@ Two settings in the Video section relight the game like a present-day remaster, 
   - The game's own directional lights are evaluated at each pixel and wrap a little past the terminator.
   - The ambient light comes brighter from above than below.
   - Past a knee, light rolls off towards white instead of clipping, so a model lit by two of the game's lights keeps its shape instead of going flat.
-  - On top of that come what the PSP could not show: a soft normalised Blinn-Phong highlight of each light with a dielectric Fresnel term, and a rim of sky light at grazing angles.
+  - On top of that come what the PSP could not show: a soft normalised Blinn-Phong highlight of each light with a dielectric Fresnel term, a rim of sky light at grazing angles, and a back light's rim where a light is behind the model as the camera sees it (a hunter against the sun is outlined).
 - **Image effects** work on the finished 3D scene, before the interface is drawn over it, so text and menus stay untouched:
   - **Sun and shadows.** The sun is the game's own key light: the brightest directional light that stays fixed in the world, which the game lights its hunters and monsters with.
     - Before the effects, the scene's solid draws (without the sky's dome, cut out by alpha where the game cuts them) are drawn again from the sun into a 2048x2048 shadow map around the camera.
