@@ -90,6 +90,9 @@ if(MHP3RD_RENDERER)
             "kPostCompositeShader=${MHP3RD_POST_SHADER_DIR}/post_composite.frag"
             "kPostRaysShader=${MHP3RD_POST_SHADER_DIR}/post_rays.frag"
             "kPostAverageShader=${MHP3RD_POST_SHADER_DIR}/post_average.frag"
+            "kPostReflectShader=${MHP3RD_POST_SHADER_DIR}/post_reflect.frag"
+            "kWaterVertexShader=${MHP3RD_POST_SHADER_DIR}/water.vert"
+            "kWaterFragmentShader=${MHP3RD_POST_SHADER_DIR}/water.frag"
             "kShadowVertexShader=${MHP3RD_POST_SHADER_DIR}/shadow.vert"
             "kShadowFragmentShader=${MHP3RD_POST_SHADER_DIR}/shadow.frag")
         set(MHP3RD_POST_SHADER_SOURCES ${MHP3RD_POST_SHADERS})

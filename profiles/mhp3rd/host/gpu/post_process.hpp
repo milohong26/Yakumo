@@ -94,6 +94,10 @@ struct Options {
     float softness{0.025f};
     // Light shafts through the air where the sun reaches it; 0 turns them off.
     float rays{0.1f};
+    // Water: reflections of the scene and sky on the game's water surfaces,
+    // with moving ripples and the sun's glints. 0 turns them off.
+    float water{1.0f};
+    float ripples{1.0f};
     float rays_g{0.7f};  // how much the air scatters forward, towards the sun (Henyey-Greenstein g)
     float rays_reach{2600.0f};  // how far along a view ray the air is seen, in the game's units
     int debug{};  // 1 occlusion, 2 contact shadows, 3 distance, 4 bloom
@@ -146,6 +150,16 @@ public:
                        std::array<float, 16> &world_to_clip);
     void end_shadows(VkCommandBuffer commands);
 
+    // The water mask: the caller draws the scene's water surfaces again,
+    // with their own transforms and viewports, between begin_water and
+    // end_water, tested against the target's depth (in its attachment
+    // layout); position as four floats and colour as four bytes.
+    bool make_water_pipeline(VkPipelineLayout layout, VkFormat depth_format, std::uint32_t stride,
+                             std::uint32_t position_offset, std::uint32_t color_offset, std::string &error);
+    [[nodiscard]] VkPipeline water_pipeline() const noexcept { return water_pipeline_; }
+    bool begin_water(VkCommandBuffer commands, VkImageView color_view, VkImageView depth_view);
+    void end_water(VkCommandBuffer commands);
+
 private:
     struct Image {
         VkImage image{};
@@ -164,9 +178,10 @@ private:
     bool make_pass(VkFormat format, bool keep_target, VkRenderPass &pass, std::string &error);
     bool make_pipeline(const std::uint32_t *fragment, std::size_t bytes, VkRenderPass pass, VkPipeline &pipeline,
                        std::string &error);
-    // Views for bindings 0-4, 7 (views[5]) and 8 (views[6]); null takes a
-    // stand-in.
-    VkDescriptorSet make_set(std::array<VkImageView, 7> views, std::array<bool, 7> linear);
+    // Views for bindings 0-4, 7, 8, 10 and 11 (views[5] to views[8]); null
+    // takes a stand-in.
+    static constexpr std::size_t kImageBindings = 9u;
+    VkDescriptorSet make_set(std::array<VkImageView, kImageBindings> views, std::array<bool, kImageBindings> linear);
     void write_sun(const Camera &camera, const Options &options);
     bool make_shadow_resources(std::string &error);
     void run(VkCommandBuffer commands, VkRenderPass pass, VkFramebuffer framebuffer, VkExtent2D extent,
@@ -201,6 +216,7 @@ private:
     VkPipeline composite_pipeline_{};
     VkPipeline rays_pipeline_{};
     VkPipeline average_pipeline_{};
+    VkPipeline reflect_pipeline_{};
 
     // Bloom from a quarter of the target's size down, in three levels.
     static constexpr int kBloomLevels = 3;
@@ -211,6 +227,8 @@ private:
     Image visibility_b_;
     Image rays_;     // a quarter of the target: light shafts
     Image average_;  // 1x1: how much of the scene the sun reaches
+    Image water_mask_;   // full resolution: how much of each pixel is water
+    Image reflection_;   // half resolution: the water's reflection
     std::array<Image, kBloomLevels> down_{};
     std::array<Image, kBloomLevels> up_{};
     VkDescriptorPool pool_{};
@@ -222,6 +240,13 @@ private:
     VkDescriptorSet composite_set_{};
     VkDescriptorSet rays_set_{};
     VkDescriptorSet average_set_{};
+    VkDescriptorSet reflect_set_{};
+
+    // The water mask's pass (on each target's depth) and pipeline.
+    VkRenderPass water_pass_{};
+    VkPipeline water_pipeline_{};
+    std::map<VkImageView, VkFramebuffer> water_framebuffers_;  // by the target's colour view
+    bool water_this_frame_{};
     std::map<VkImageView, VkFramebuffer> target_framebuffers_;
 
     // The sun's shadow map, made once, and what it was drawn with.

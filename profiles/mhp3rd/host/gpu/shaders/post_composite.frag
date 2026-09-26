@@ -28,6 +28,8 @@ layout(set = 0, binding = 3) uniform sampler2D visibility; // half resolution: a
 layout(set = 0, binding = 4) uniform sampler2D bloom;      // half resolution, expanded linear light
 layout(set = 0, binding = 7) uniform sampler2D rays;       // quarter resolution: light shafts
 layout(set = 0, binding = 8) uniform sampler2D average;    // 1x1: rgb the sky's colour, a how much the sun reaches
+layout(set = 0, binding = 10) uniform sampler2D water_mask; // full resolution: how much of the pixel is water
+layout(set = 0, binding = 11) uniform sampler2D reflection; // half resolution: rgb the reflection, a how sure
 layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 out_color;
 
@@ -227,6 +229,27 @@ void main() {
     float k = p.c.z;
     float peak = max(color.r, max(color.g, color.b));
     color = scale_peak(color, expand(min(peak, 0.999), k)) * p.b.x;
+    if (!sky && sun.water.w > 0.5) {
+        float water = texelFetch(water_mask, ivec2(gl_FragCoord.xy), 0).r;
+        if (water > 0.0) {
+            // The rippled surface mirrors the scene (or the sky where the
+            // reflection finds nothing) by Schlick's Fresnel term, more at
+            // grazing angles, and the sun glints on it where it reaches.
+            vec3 position = view_position(gl_FragCoord.xy, dist);
+            vec3 world = (sun.view_to_world * vec4(position, 1.0)).xyz;
+            vec3 n = water_normal(world);
+            vec3 v = normalize(-position);
+            float fresnel = 0.02 + 0.98 * pow(1.0 - max(dot(n, v), 0.0), 5.0);
+            vec4 found = texture(reflection, uv);
+            vec3 sky_light = texelFetch(average, ivec2(0), 0).rgb;
+            vec3 mirrored = mix(sky_light * 1.1, found.rgb, found.a);
+            float amount = clamp(fresnel * 1.6 + 0.12, 0.0, 1.0) * water * sun.water.x * clear;
+            color = mix(color, mirrored, amount);
+            vec3 h = normalize(sun.direction.xyz + v);
+            float glint = pow(max(dot(n, h), 0.0), 600.0) * 60.0 + pow(max(dot(n, h), 0.0), 60.0) * 0.6;
+            color += sun.color.rgb * (glint * fresnel * 4.0 * vis.y * water * sun.water.x * clear * sun.color.w);
+        }
+    }
     if (!sky && sun.params.z > 0.5) {
         // Sunlight over the game's own lighting, as light added before the
         // shoulder: lit surfaces take on more light of the sun's colour,

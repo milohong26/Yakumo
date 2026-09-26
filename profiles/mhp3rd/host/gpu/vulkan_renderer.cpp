@@ -1089,6 +1089,23 @@ struct VulkanRenderer::Impl {
     };
     std::vector<ShadowCaster> shadow_casters;
     bool shadow_frame{};  // this frame's casters are being kept
+    // The scene's water surfaces as drawn (looks_like_water), drawn again
+    // into the water mask before the effects.
+    struct WaterDraw {
+        std::array<float, 16> transform{};
+        VkViewport viewport{};
+        VkRect2D scissor{};
+        VkBuffer index_buffer{};
+        VkDeviceSize vertex_base{};
+        VkDeviceSize index_base{};
+        std::uint32_t count{};
+    };
+    std::vector<WaterDraw> water_draws;
+    bool current_draw_water{};  // the draw being submitted is water (for its replay group)
+    void note_water(const DrawCall &call, bool water, const PushConstants &push, const VkViewport &viewport,
+                    const VkRect2D &scissor, VkBuffer index_buffer, VkDeviceSize vertex_base, VkDeviceSize index_base,
+                    std::uint32_t count);
+    void draw_water(VkCommandBuffer commands, const Target &target, const std::vector<WaterDraw> &draws);
     std::uint32_t shadow_skipped_sky{};
     // MHP3RD_TRACE_EFFECTS: the lights of the frame's first lit scene draw,
     // to tell a sun fixed in the world from lights that follow the camera.
@@ -1487,6 +1504,7 @@ struct VulkanRenderer::Impl {
         std::uint32_t object{kNone};  // FrameRecord::objects, for a lit group
         std::uint32_t skinned{kNone}; // FrameRecord::skinned: the vertices of a group of skinned draws
         bool raw{};                   // drawn from the guest's vertex bytes at vertex_base (first instance)
+        bool water{};                 // the scene's water, drawn again into the water mask
         std::uint32_t raw_block{kNone}; // FrameRecord::raws: its format and bones
     };
     struct FrameRecord {
@@ -2478,6 +2496,10 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
         if (!impl.fx().make_shadow_pipeline(impl.pipeline_layout, sizeof(GpuVertex), offsetof(GpuVertex, x),
                                             offsetof(GpuVertex, u), shadow_error))
             std::cout << "[render] sun shadows unavailable: " << shadow_error << "\n";
+        std::string water_error;
+        if (!impl.fx().make_water_pipeline(impl.pipeline_layout, impl.depth_format, sizeof(GpuVertex),
+                                           offsetof(GpuVertex, x), offsetof(GpuVertex, color), water_error))
+            std::cout << "[render] water reflections unavailable: " << water_error << "\n";
     }
 
     VkSamplerCreateInfo sampler_info{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
@@ -3439,6 +3461,7 @@ void VulkanRenderer::Impl::reset_scene() {
     before_scene = {1e9f, 1e9f, -1e9f, -1e9f};
     before_scene_draws = 0u;
     shadow_casters.clear();
+    water_draws.clear();
     scene_lights_known = false;
 }
 
@@ -3569,6 +3592,7 @@ void VulkanRenderer::Impl::apply_effects(std::uint32_t address) {
     }
     Target &target = found->second;
     if (shadow_frame) draw_shadows(camera);
+    draw_water(command_buffer, target, water_draws);
     fx().record(command_buffer, target.color, target.color_view, target.depth, depth_aspect(), camera,
                 effect_options);
     // The effects bound pipelines and sets of their own.
@@ -3583,6 +3607,7 @@ struct WorldSphere {
     std::array<float, 3> centre{};
     float radius{};
     bool known{};
+    float up{};  // how far the draw's surfaces face up in the world, area-weighted: -1 to 1
 };
 WorldSphere world_sphere(const DrawCall &call) {
     WorldSphere sphere{};
@@ -3604,7 +3629,41 @@ WorldSphere world_sphere(const DrawCall &call) {
     const float dx = hi[0] - mid[0], dy = hi[1] - mid[1], dz = hi[2] - mid[2];
     sphere.radius = std::sqrt(dx * dx + dy * dy + dz * dz) * scale;
     sphere.known = true;
+    // The surfaces' facing, from the triangles as a list or a strip.
+    const auto world_at = [&](const Vertex &v) {
+        return std::array<float, 3>{w[0] * v.position[0] + w[4] * v.position[1] + w[8] * v.position[2],
+                                    w[1] * v.position[0] + w[5] * v.position[1] + w[9] * v.position[2],
+                                    w[2] * v.position[0] + w[6] * v.position[1] + w[10] * v.position[2]};
+    };
+    float up = 0.0f, area = 0.0f;
+    const bool strip = call.primitive == PrimitiveType::TriangleStrip;
+    const std::size_t count = call.vertices.size();
+    for (std::size_t i = 0; i + 2 < count; i += strip ? 1u : 3u) {
+        const auto a = world_at(call.vertices[i]), b = world_at(call.vertices[i + 1]), c = world_at(call.vertices[i + 2]);
+        const std::array<float, 3> e1{b[0] - a[0], b[1] - a[1], b[2] - a[2]}, e2{c[0] - a[0], c[1] - a[1], c[2] - a[2]};
+        const std::array<float, 3> n{e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2],
+                                     e1[0] * e2[1] - e1[1] * e2[0]};
+        const float length = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+        up += std::fabs(n[1]);
+        area += length;
+    }
+    sphere.up = area > 0.0f ? up / area : 0.0f;
     return sphere;
+}
+
+// The game's water, as it draws it: large, flat surfaces facing up, blended
+// over what is under them by their vertex alpha (not all opaque), writing
+// depth. Traced with MHP3RD_EFFECTS_DUMP; hiding the texture of such draws
+// (MHP3RD_HIDE_TEXTURES) takes the water away.
+bool looks_like_water(const DrawCall &call) {
+    if (call.through || call.clear_mode || !call.blend.enabled || call.blend.destination_factor != 3u ||
+        !call.depth.write_enabled || !call.depth.test_enabled || !call.has_vertex_color || call.vertices.size() < 3u)
+        return false;
+    std::uint32_t alpha_hi = 0u;
+    for (const Vertex &vertex : call.vertices) alpha_hi = std::max(alpha_hi, vertex.color >> 24u);
+    if (alpha_hi >= 240u) return false;
+    const WorldSphere sphere = world_sphere(call);
+    return sphere.known && sphere.up > 0.97f && sphere.radius > 100.0f;
 }
 
 // A draw of the scene that casts the sun's shadows: solid (or cut out by
@@ -3696,6 +3755,39 @@ void VulkanRenderer::Impl::draw_shadows(const post::Camera &camera) {
     }
     fx().end_shadows(command_buffer);
     forget_bindings();
+}
+
+void VulkanRenderer::Impl::note_water(const DrawCall &call, bool water, const PushConstants &push,
+                                      const VkViewport &viewport, const VkRect2D &scissor, VkBuffer index_buffer,
+                                      VkDeviceSize vertex_base, VkDeviceSize index_base, std::uint32_t count) {
+    if (!water || !effects_frame || effects_applied || count == 0u || !shows(call.target.color_address) ||
+        water_draws.size() >= 4096u)
+        return;
+    water_draws.push_back({push.transform, viewport, scissor, index_buffer, vertex_base, index_base, count});
+}
+
+void VulkanRenderer::Impl::draw_water(VkCommandBuffer commands, const Target &target,
+                                      const std::vector<WaterDraw> &draws) {
+    if (draws.empty() || fx().water_pipeline() == VK_NULL_HANDLE) return;
+    if (!fx().begin_water(commands, target.color_view, target.depth_view)) return;
+    PushConstants push{};
+    for (const WaterDraw &draw : draws) {
+        vkCmdSetViewport(commands, 0u, 1u, &draw.viewport);
+        vkCmdSetScissor(commands, 0u, 1u, &draw.scissor);
+        push.transform = draw.transform;
+        vkCmdPushConstants(commands, pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0u,
+                           sizeof(push), &push);
+        vkCmdBindVertexBuffers(commands, 0u, 1u, &vertex_buffer, &draw.vertex_base);
+        if (draw.index_buffer != VK_NULL_HANDLE) {
+            const VkDeviceSize aligned = draw.index_base & ~VkDeviceSize{3u};
+            vkCmdBindIndexBuffer(commands, draw.index_buffer, aligned, VK_INDEX_TYPE_UINT16);
+            vkCmdDrawIndexed(commands, draw.count, 1u,
+                             static_cast<std::uint32_t>((draw.index_base - aligned) / sizeof(std::uint16_t)), 0, 0u);
+        } else {
+            vkCmdDraw(commands, draw.count, 1u, 0u, 0u);
+        }
+    }
+    fx().end_water(commands);
 }
 
 void VulkanRenderer::Impl::destroy_target(Target &target) {
@@ -5852,6 +5944,24 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     // decoded vertices (GeState::set_raw_vertices).
     const bool raw = call.raw_vertices != nullptr;
     if (call.vertices.empty() && !raw) return;
+    // MHP3RD_HIDE_TEXTURES: draws with these texture addresses (hex, commas
+    // between) are not drawn, to find which draws make what on screen.
+    static const std::vector<std::uint32_t> hidden_textures = [] {
+        std::vector<std::uint32_t> list;
+        if (const char *text = std::getenv("MHP3RD_HIDE_TEXTURES")) {
+            for (const char *at = text; *at != '\0';) {
+                char *end = nullptr;
+                const unsigned long value = std::strtoul(at, &end, 16);
+                if (end == at) break;
+                list.push_back(static_cast<std::uint32_t>(value));
+                at = *end == ',' ? end + 1 : end;
+            }
+        }
+        return list;
+    }();
+    if (!hidden_textures.empty() && call.texture.enabled &&
+        std::find(hidden_textures.begin(), hidden_textures.end(), call.texture.address) != hidden_textures.end())
+        return;
 
     // Everything becomes a triangle list; sprites expand to two triangles.
     impl.scratch.clear();
@@ -5870,6 +5980,9 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     static const bool no_lighting = std::getenv("MHP3RD_NO_LIGHTING") != nullptr;
     static const bool no_fog = no_lighting || std::getenv("MHP3RD_NO_FOG") != nullptr;
     const bool lit = call.lighting_enabled && !no_lighting && !call.through && !call.clear_mode;
+    // The scene's water, for the reflections.
+    const bool water = impl.effects_frame && !raw && !call.through && looks_like_water(call);
+    impl.current_draw_water = water;
     // Lit per pixel: opaque and alpha-blended models, not the additive glows
     // a highlight or rim would only brighten further.
     const bool per_pixel = lit && impl.per_pixel_frame &&
@@ -6547,9 +6660,14 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
         }
         const WorldSphere sphere = world_sphere(call);
         const std::array<float, 3> eye = camera_position(call.view);
+        std::uint32_t alpha_lo = 255u, alpha_hi = 0u;
+        for (const Vertex &vertex : call.vertices) {
+            alpha_lo = std::min(alpha_lo, vertex.color >> 24u);
+            alpha_hi = std::max(alpha_hi, vertex.color >> 24u);
+        }
         const float ex = sphere.centre[0] - eye[0], ey = sphere.centre[1] - eye[1], ez = sphere.centre[2] - eye[2];
         std::printf("[dump] %4u %s target 0x%08X%s verts %zu %s tex %s 0x%08X%s blend %s %u/%u depth %s%s ortho %d "
-                    "fog %d r %.0f d %.0f %s%s\n",
+                    "fog %d r %.0f d %.0f up %.2f y %.0f lit %d alpha %u-%u vc %d fn %u %s%s\n",
                     impl.dump_index++, call.clear_mode ? "CLEAR" : call.through ? "2D   " : "3D   ",
                     call.target.color_address, impl.shows(call.target.color_address) ? " shown" : "      ",
                     call.vertices.size(),
@@ -6562,8 +6680,9 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
                     call.blend.source_factor, call.blend.destination_factor, call.depth.test_enabled ? "test" : "-",
                     call.depth.write_enabled ? "+write" : "", interpolation::is_orthographic(call.projection) ? 1 : 0,
                     call.fog.enabled ? 1 : 0, static_cast<double>(sphere.radius),
-                    static_cast<double>(std::sqrt(ex * ex + ey * ey + ez * ez)), impl.effects_applied ? "fx-done" : "",
-                    "");
+                    static_cast<double>(std::sqrt(ex * ex + ey * ey + ez * ez)), static_cast<double>(sphere.up),
+                    static_cast<double>(sphere.centre[1]), call.lighting_enabled ? 1 : 0, alpha_lo, alpha_hi,
+                    call.has_vertex_color ? 1 : 0, call.texture.function, impl.effects_applied ? "fx-done" : "", "");
     }
 
     if (!impl.pass_active || impl.current_target != call.target.color_address) {
@@ -6688,6 +6807,7 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
             if (!raw)
                 impl.note_shadow_caster(call, texture_descriptor, push.uv_transform, VK_NULL_HANDLE, vertex_start, 0u,
                                         draw_count);
+            impl.note_water(call, water, push, vk_viewport, vk_scissor, VK_NULL_HANDLE, vertex_start, 0u, draw_count);
             impl.record_draw_for_replay(call, lit, skinned_first, state, vertex_start, VK_NULL_HANDLE, 0u,
                                         draw_count, drawn_vertices, false);
         } else {
@@ -6727,6 +6847,8 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
             if (!raw)
                 impl.note_shadow_caster(call, texture_descriptor, push.uv_transform, impl.index_buffer,
                                         group.vertex_base, impl.index_offset, draw_count);
+            impl.note_water(call, water, push, vk_viewport, vk_scissor, impl.index_buffer, group.vertex_base,
+                            impl.index_offset, draw_count);
             impl.index_offset += impl.direct_indices.size() * sizeof(std::uint16_t);
             group.vertex_end = draw_end;
             group.index_count += draw_count;
@@ -6769,6 +6891,8 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     if (!raw)
         impl.note_shadow_caster(call, texture_descriptor, push.uv_transform, direct ? impl.vertex_buffer : VK_NULL_HANDLE,
                                 vertex_start, index_start, draw_count);
+    impl.note_water(call, water, push, vk_viewport, vk_scissor, direct ? impl.vertex_buffer : VK_NULL_HANDLE,
+                    vertex_start, index_start, draw_count);
     if (impl.interpolating) {
         const Impl::DrawState state{pipeline, texture_descriptor, lighting_offsets, vk_viewport, vk_scissor,
                                     blend_constants, push};
@@ -7017,6 +7141,7 @@ void VulkanRenderer::Impl::record_draw_for_replay(const DrawCall &call, bool lit
         // up after its vertices were copied breaks that, and the group is
         // then drawn with its own vertices.
         if (last.skinned != kNone && skinned != last.skinned + last.vertex_count) last.skinned = kNone;
+        last.water = last.water || current_draw_water;
         last.count += count;
         last.vertex_count += vertex_count;
     } else {
@@ -7038,6 +7163,7 @@ void VulkanRenderer::Impl::record_draw_for_replay(const DrawCall &call, bool lit
         }
         added.skinned = skinned;
         added.raw = raw;
+        added.water = current_draw_water;
         if (raw && ((call.vertex_type >> 9u) & 3u) != 0u) {
             // A skinned raw group is blended through its bones.
             if (frame.raws.empty() || frame.raw_offset != raw_offset) {
@@ -7384,8 +7510,11 @@ void VulkanRenderer::Impl::replay(VkCommandBuffer commands, std::uint32_t slot, 
     static const bool motion_guard = std::getenv("MHP3RD_INTERPOLATION_NO_MOTION_GUARD") == nullptr;
 
     // The lighting effects, where the recorded frame had them.
+    // The water, as this in-between frame draws it.
+    std::vector<WaterDraw> replay_water;
     const auto apply_effects_here = [&](bool resume) {
         vkCmdEndRenderPass(commands);
+        draw_water(commands, target, replay_water);
         // The in-between camera, as the scenery is drawn with it: the older
         // frame's moved along the camera's motion. The sun's shadows are
         // looked up through it and stay put on the ground.
@@ -7567,6 +7696,9 @@ void VulkanRenderer::Impl::replay(VkCommandBuffer commands, std::uint32_t slot, 
                                0u, sizeof(PushConstants), &state.push);
         set = state;
         known = true;
+        if (drawn.water && replay_effects)
+            replay_water.push_back({state.push.transform, state.viewport, state.scissor, drawn.index_buffer,
+                                    vertex_base, drawn.index_base, drawn.count});
         vkCmdBindVertexBuffers(commands, 0u, 1u, &vertex_buffer, &vertex_base);
         if (drawn.index_buffer != VK_NULL_HANDLE) {
             vkCmdBindIndexBuffer(commands, drawn.index_buffer, drawn.index_base, VK_INDEX_TYPE_UINT16);

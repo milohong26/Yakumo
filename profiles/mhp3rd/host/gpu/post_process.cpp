@@ -1,6 +1,7 @@
 #include "gpu/post_process.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -116,6 +117,8 @@ struct SunBlock {
     float shade[4];
     float params[4];
     float rays[4];
+    float view_to_world[16];
+    float water[4];
 };
 
 } // namespace
@@ -301,9 +304,9 @@ bool Effects::create(VkDevice device, VkPhysicalDevice physical_device, VkPipeli
     if (!check(vkCreateSampler(device_, &sampler, nullptr, &shadow_sampler_), "vkCreateSampler (effects)", error))
         return false;
 
-    // Bindings 0-4, 7 and 8: the pass's images; 5: the shadow map, compared;
-    // 6: the sun; 9: the shadow map's depths.
-    std::array<VkDescriptorSetLayoutBinding, 10> bindings{};
+    // Bindings 0-4, 7, 8, 10 and 11: the pass's images; 5: the shadow map,
+    // compared; 6: the sun; 9: the shadow map's depths.
+    std::array<VkDescriptorSetLayoutBinding, 12> bindings{};
     for (std::uint32_t i = 0; i < bindings.size(); ++i) {
         bindings[i].binding = i;
         bindings[i].descriptorType =
@@ -343,7 +346,8 @@ bool Effects::create(VkDevice device, VkPhysicalDevice physical_device, VkPipeli
         !make_pipeline(kPostBloomUpShader, sizeof(kPostBloomUpShader), pass_rgba16f_, up_pipeline_, error) ||
         !make_pipeline(kPostCompositeShader, sizeof(kPostCompositeShader), pass_target_, composite_pipeline_, error) ||
         !make_pipeline(kPostRaysShader, sizeof(kPostRaysShader), pass_rg16f_, rays_pipeline_, error) ||
-        !make_pipeline(kPostAverageShader, sizeof(kPostAverageShader), pass_average_, average_pipeline_, error))
+        !make_pipeline(kPostAverageShader, sizeof(kPostAverageShader), pass_average_, average_pipeline_, error) ||
+        !make_pipeline(kPostReflectShader, sizeof(kPostReflectShader), pass_average_, reflect_pipeline_, error))
         return false;
     if (!make_shadow_resources(error)) return false;
     ready_ = true;
@@ -496,6 +500,180 @@ bool Effects::make_shadow_pipeline(VkPipelineLayout layout, std::uint32_t stride
     return made;
 }
 
+bool Effects::make_water_pipeline(VkPipelineLayout layout, VkFormat depth_format, std::uint32_t stride,
+                                  std::uint32_t position_offset, std::uint32_t color_offset, std::string &error) {
+    // The mask, cleared, and the target's depth, tested and kept as it is.
+    std::array<VkAttachmentDescription, 2> attachments{};
+    attachments[0].format = VK_FORMAT_R8_UNORM;
+    attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
+    attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    attachments[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    attachments[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    attachments[0].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    attachments[1].format = depth_format;
+    attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
+    attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    attachments[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
+    attachments[1].initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    attachments[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    const VkAttachmentReference color_reference{0u, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    const VkAttachmentReference depth_reference{1u, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1u;
+    subpass.pColorAttachments = &color_reference;
+    subpass.pDepthStencilAttachment = &depth_reference;
+    constexpr VkPipelineStageFlags kTests =
+        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+    std::array<VkSubpassDependency, 2> dependencies{};
+    dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+    dependencies[0].dstSubpass = 0u;
+    dependencies[0].srcStageMask = kTests | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    dependencies[0].dstStageMask = kTests | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependencies[0].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+    dependencies[0].dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    dependencies[1].srcSubpass = 0u;
+    dependencies[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+    dependencies[1].srcStageMask = kTests | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependencies[1].dstStageMask = kTests | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
+    dependencies[1].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    dependencies[1].dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                                    VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT |
+                                    VK_ACCESS_TRANSFER_READ_BIT;
+    VkRenderPassCreateInfo pass{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+    pass.attachmentCount = static_cast<std::uint32_t>(attachments.size());
+    pass.pAttachments = attachments.data();
+    pass.subpassCount = 1u;
+    pass.pSubpasses = &subpass;
+    pass.dependencyCount = static_cast<std::uint32_t>(dependencies.size());
+    pass.pDependencies = dependencies.data();
+    if (!check(vkCreateRenderPass(device_, &pass, nullptr, &water_pass_), "vkCreateRenderPass (water)", error))
+        return false;
+
+    std::array<VkShaderModule, 2> modules{};
+    const std::array<std::pair<const std::uint32_t *, std::size_t>, 2> code{
+        std::pair{kWaterVertexShader, sizeof(kWaterVertexShader)},
+        std::pair{kWaterFragmentShader, sizeof(kWaterFragmentShader)}};
+    for (std::size_t i = 0; i < modules.size(); ++i) {
+        VkShaderModuleCreateInfo info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+        info.codeSize = code[i].second;
+        info.pCode = code[i].first;
+        if (!check(vkCreateShaderModule(device_, &info, nullptr, &modules[i]), "vkCreateShaderModule (water)",
+                   error)) {
+            for (VkShaderModule module : modules) vkDestroyShaderModule(device_, module, nullptr);
+            return false;
+        }
+    }
+    std::array<VkPipelineShaderStageCreateInfo, 2> stages{};
+    for (std::size_t i = 0; i < stages.size(); ++i) {
+        stages[i] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+        stages[i].stage = i == 0 ? VK_SHADER_STAGE_VERTEX_BIT : VK_SHADER_STAGE_FRAGMENT_BIT;
+        stages[i].module = modules[i];
+        stages[i].pName = "main";
+    }
+    const VkVertexInputBindingDescription binding{0u, stride, VK_VERTEX_INPUT_RATE_VERTEX};
+    const std::array<VkVertexInputAttributeDescription, 2> attributes{
+        VkVertexInputAttributeDescription{0u, 0u, VK_FORMAT_R32G32B32A32_SFLOAT, position_offset},
+        VkVertexInputAttributeDescription{2u, 0u, VK_FORMAT_R8G8B8A8_UNORM, color_offset}};
+    VkPipelineVertexInputStateCreateInfo vertex_input{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    vertex_input.vertexBindingDescriptionCount = 1u;
+    vertex_input.pVertexBindingDescriptions = &binding;
+    vertex_input.vertexAttributeDescriptionCount = static_cast<std::uint32_t>(attributes.size());
+    vertex_input.pVertexAttributeDescriptions = attributes.data();
+    VkPipelineInputAssemblyStateCreateInfo assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+    assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkPipelineViewportStateCreateInfo viewport{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+    viewport.viewportCount = 1u;
+    viewport.scissorCount = 1u;
+    // The water wrote this depth itself; a nudge towards the camera lets it
+    // pass its own test whatever the two shaders' rounding.
+    VkPipelineRasterizationStateCreateInfo raster{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+    raster.polygonMode = VK_POLYGON_MODE_FILL;
+    raster.cullMode = VK_CULL_MODE_NONE;
+    raster.depthBiasEnable = VK_TRUE;
+    raster.depthBiasConstantFactor = -8.0f;
+    raster.depthBiasSlopeFactor = -1.0f;
+    raster.lineWidth = 1.0f;
+    VkPipelineMultisampleStateCreateInfo multisample{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+    multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    VkPipelineDepthStencilStateCreateInfo depth{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+    depth.depthTestEnable = VK_TRUE;
+    depth.depthWriteEnable = VK_FALSE;
+    depth.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+    VkPipelineColorBlendAttachmentState blend{};
+    blend.colorWriteMask = VK_COLOR_COMPONENT_R_BIT;
+    // Overlapping pieces keep the most water.
+    blend.blendEnable = VK_TRUE;
+    blend.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+    blend.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+    blend.colorBlendOp = VK_BLEND_OP_MAX;
+    blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    blend.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    blend.alphaBlendOp = VK_BLEND_OP_MAX;
+    VkPipelineColorBlendStateCreateInfo blending{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+    blending.attachmentCount = 1u;
+    blending.pAttachments = &blend;
+    const std::array<VkDynamicState, 2> dynamic_states{VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dynamic{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+    dynamic.dynamicStateCount = static_cast<std::uint32_t>(dynamic_states.size());
+    dynamic.pDynamicStates = dynamic_states.data();
+    VkGraphicsPipelineCreateInfo info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+    info.stageCount = static_cast<std::uint32_t>(stages.size());
+    info.pStages = stages.data();
+    info.pVertexInputState = &vertex_input;
+    info.pInputAssemblyState = &assembly;
+    info.pViewportState = &viewport;
+    info.pRasterizationState = &raster;
+    info.pMultisampleState = &multisample;
+    info.pDepthStencilState = &depth;
+    info.pColorBlendState = &blending;
+    info.pDynamicState = &dynamic;
+    info.layout = layout;
+    info.renderPass = water_pass_;
+    const bool made = check(vkCreateGraphicsPipelines(device_, cache_, 1u, &info, nullptr, &water_pipeline_),
+                            "vkCreateGraphicsPipelines (water)", error);
+    for (VkShaderModule module : modules) vkDestroyShaderModule(device_, module, nullptr);
+    return made;
+}
+
+bool Effects::begin_water(VkCommandBuffer commands, VkImageView color_view, VkImageView depth_view) {
+    if (!ready() || water_pipeline_ == VK_NULL_HANDLE || depth_view == VK_NULL_HANDLE) return false;
+    VkFramebuffer &framebuffer = water_framebuffers_[color_view];
+    if (framebuffer == VK_NULL_HANDLE) {
+        const std::array<VkImageView, 2> views{water_mask_.view, depth_view};
+        VkFramebufferCreateInfo info{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+        info.renderPass = water_pass_;
+        info.attachmentCount = static_cast<std::uint32_t>(views.size());
+        info.pAttachments = views.data();
+        info.width = extent_.width;
+        info.height = extent_.height;
+        info.layers = 1u;
+        if (vkCreateFramebuffer(device_, &info, nullptr, &framebuffer) != VK_SUCCESS) {
+            water_framebuffers_.erase(color_view);
+            return false;
+        }
+    }
+    std::array<VkClearValue, 2> clears{};
+    VkRenderPassBeginInfo begin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+    begin.renderPass = water_pass_;
+    begin.framebuffer = framebuffer;
+    begin.renderArea = {{0, 0}, extent_};
+    begin.clearValueCount = static_cast<std::uint32_t>(clears.size());
+    begin.pClearValues = clears.data();
+    vkCmdBeginRenderPass(commands, &begin, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBindPipeline(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, water_pipeline_);
+    return true;
+}
+
+void Effects::end_water(VkCommandBuffer commands) {
+    vkCmdEndRenderPass(commands);
+    water_this_frame_ = true;
+}
+
 bool Effects::begin_shadows(VkCommandBuffer commands, const Camera &camera, const Options &options,
                             Matrix &world_to_clip) {
     if (!ready_ || shadow_pipeline_ == VK_NULL_HANDLE || !camera.valid || options.sun <= 0.0f) return false;
@@ -610,6 +788,13 @@ void Effects::write_sun(const Camera &camera, const Options &options) {
     // World units across the shadow map's depth, and how wide the sun's
     // disc makes a penumbra per unit of distance to the caster.
     block.rays[3] = options.softness;
+    const Matrix view_to_world = inverse_affine(camera.view);
+    std::memcpy(block.view_to_world, view_to_world.data(), sizeof(block.view_to_world));
+    static const auto started = std::chrono::steady_clock::now();
+    block.water[0] = options.water;
+    block.water[1] = options.ripples;
+    block.water[2] = std::fmod(std::chrono::duration<float>(std::chrono::steady_clock::now() - started).count(), 3600.0f);
+    block.water[3] = water_this_frame_ && options.water > 0.0f ? 1.0f : 0.0f;
     const std::uint32_t slot = sun_next_++ % kSunSlots;
     sun_offset_ = static_cast<std::uint32_t>(slot * sun_stride_);
     std::memcpy(static_cast<std::uint8_t *>(sun_mapped_) + sun_offset_, &block, sizeof(block));
@@ -666,47 +851,42 @@ void Effects::destroy_image(Image &image) {
     image = Image{};
 }
 
-VkDescriptorSet Effects::make_set(std::array<VkImageView, 7> views, std::array<bool, 7> linear) {
+VkDescriptorSet Effects::make_set(std::array<VkImageView, kImageBindings> views,
+                                  std::array<bool, kImageBindings> linear) {
+    constexpr std::array<std::uint32_t, kImageBindings> kBinding{0u, 1u, 2u, 3u, 4u, 7u, 8u, 10u, 11u};
     VkDescriptorSetAllocateInfo allocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     allocate.descriptorPool = pool_;
     allocate.descriptorSetCount = 1u;
     allocate.pSetLayouts = &set_layout_;
     VkDescriptorSet set{};
     if (vkAllocateDescriptorSets(device_, &allocate, &set) != VK_SUCCESS) return VK_NULL_HANDLE;
-    std::array<VkDescriptorImageInfo, 9> images{};
-    std::array<VkWriteDescriptorSet, 10> writes{};
-    for (std::uint32_t i = 0; i < 7u; ++i) {
-        // Bindings a pass does not use still get a valid image.
-        const VkImageView view = views[i] != VK_NULL_HANDLE ? views[i] : distances_.view;
-        images[i] = {linear[i] ? linear_ : nearest_, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    std::array<VkDescriptorImageInfo, kImageBindings + 2u> images{};
+    std::array<VkWriteDescriptorSet, kImageBindings + 3u> writes{};
+    const auto write_image = [&](std::size_t i, std::uint32_t binding, VkDescriptorImageInfo info) {
+        images[i] = info;
         writes[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
         writes[i].dstSet = set;
-        writes[i].dstBinding = i < 5u ? i : i + 2u;
+        writes[i].dstBinding = binding;
         writes[i].descriptorCount = 1u;
         writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         writes[i].pImageInfo = &images[i];
+    };
+    for (std::size_t i = 0; i < kImageBindings; ++i) {
+        // Bindings a pass does not use still get a valid image.
+        const VkImageView view = views[i] != VK_NULL_HANDLE ? views[i] : distances_.view;
+        write_image(i, kBinding[i], {linear[i] ? linear_ : nearest_, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL});
     }
-    images[7] = {shadow_sampler_, shadow_.view, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL};
-    writes[7] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    writes[7].dstSet = set;
-    writes[7].dstBinding = 5u;
-    writes[7].descriptorCount = 1u;
-    writes[7].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[7].pImageInfo = &images[7];
+    // The shadow map, compared (5) and as depths (9).
+    write_image(kImageBindings, 5u, {shadow_sampler_, shadow_.view, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL});
+    write_image(kImageBindings + 1u, 9u, {nearest_, shadow_.view, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL});
     const VkDescriptorBufferInfo sun{sun_buffer_, 0u, sizeof(SunBlock)};
-    writes[8] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    writes[8].dstSet = set;
-    writes[8].dstBinding = 6u;
-    writes[8].descriptorCount = 1u;
-    writes[8].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
-    writes[8].pBufferInfo = &sun;
-    images[8] = {nearest_, shadow_.view, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL};
-    writes[9] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    writes[9].dstSet = set;
-    writes[9].dstBinding = 9u;
-    writes[9].descriptorCount = 1u;
-    writes[9].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[9].pImageInfo = &images[8];
+    VkWriteDescriptorSet &sun_write = writes[kImageBindings + 2u];
+    sun_write = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    sun_write.dstSet = set;
+    sun_write.dstBinding = 6u;
+    sun_write.descriptorCount = 1u;
+    sun_write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+    sun_write.pBufferInfo = &sun;
     vkUpdateDescriptorSets(device_, static_cast<std::uint32_t>(writes.size()), writes.data(), 0u, nullptr);
     return set;
 }
@@ -729,6 +909,10 @@ bool Effects::resize(VkExtent2D extent, VkFormat depth_format, std::string &erro
         !make_image(visibility_b_, half, kVisibility, kDrawn, VK_IMAGE_ASPECT_COLOR_BIT, pass_rg16f_, error) ||
         !make_image(rays_, half_of(extent, 2), kVisibility, kDrawn, VK_IMAGE_ASPECT_COLOR_BIT, pass_rg16f_, error) ||
         !make_image(average_, {1u, 1u}, VK_FORMAT_R16G16B16A16_SFLOAT, kDrawn, VK_IMAGE_ASPECT_COLOR_BIT,
+                    pass_average_, error) ||
+        !make_image(water_mask_, extent, VK_FORMAT_R8_UNORM, kDrawn, VK_IMAGE_ASPECT_COLOR_BIT, VK_NULL_HANDLE,
+                    error) ||
+        !make_image(reflection_, half, VK_FORMAT_R16G16B16A16_SFLOAT, kDrawn, VK_IMAGE_ASPECT_COLOR_BIT,
                     pass_average_, error)) {
         destroy_sized();
         return false;
@@ -742,7 +926,7 @@ bool Effects::resize(VkExtent2D extent, VkFormat depth_format, std::string &erro
         }
     }
     const std::array<VkDescriptorPoolSize, 2> sizes{
-        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 9u * 32u},
+        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 11u * 32u},
         VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 32u}};
     VkDescriptorPoolCreateInfo pool{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     pool.maxSets = 32u;
@@ -762,10 +946,11 @@ bool Effects::resize(VkExtent2D extent, VkFormat depth_format, std::string &erro
         up_sets_[i] = make_set({i == kBloomLevels - 1 ? down_[i].view : up_[i + 1].view, down_[i].view}, {L, L});
     }
     composite_set_ = make_set({scene_color_.view, scene_depth_.view, distances_.view, visibility_b_.view, up_[0].view,
-                               rays_.view, average_.view},
-                              {L, N, N, L, L, L, N});
+                               rays_.view, average_.view, water_mask_.view, reflection_.view},
+                              {L, N, N, L, L, L, N, N, L});
     rays_set_ = make_set({distances_.view}, {N});
     average_set_ = make_set({visibility_b_.view, distances_.view, scene_color_.view}, {N, N, N});
+    reflect_set_ = make_set({distances_.view, scene_color_.view, water_mask_.view}, {N, L, L});
     sized_ = true;
     primed_ = false;
     return true;
@@ -791,7 +976,8 @@ void Effects::prime(VkCommandBuffer commands) {
     if (primed_) return;
     primed_ = true;
     std::vector<std::pair<Image *, float>> images{
-        {&distances_, 1.0e6f}, {&visibility_a_, 1.0f}, {&visibility_b_, 1.0f}, {&rays_, 0.0f}, {&average_, 1.0f}};
+        {&distances_, 1.0e6f}, {&visibility_a_, 1.0f}, {&visibility_b_, 1.0f}, {&rays_, 0.0f}, {&average_, 1.0f},
+        {&water_mask_, 0.0f},  {&reflection_, 0.0f}};
     for (Image &image : down_) images.push_back({&image, 0.0f});
     for (Image &image : up_) images.push_back({&image, 0.0f});
     for (const auto &[image, value] : images) {
@@ -821,6 +1007,10 @@ void Effects::destroy_sized() {
     destroy_image(visibility_b_);
     destroy_image(rays_);
     destroy_image(average_);
+    destroy_image(water_mask_);
+    destroy_image(reflection_);
+    for (auto &[view, framebuffer] : water_framebuffers_) vkDestroyFramebuffer(device_, framebuffer, nullptr);
+    water_framebuffers_.clear();
     for (Image &image : down_) destroy_image(image);
     for (Image &image : up_) destroy_image(image);
 }
@@ -830,7 +1020,7 @@ void Effects::destroy() {
     destroy_sized();
     for (VkPipeline pipeline :
          {depth_pipeline_, ao_pipeline_, blur_pipeline_, down_pipeline_, up_pipeline_, composite_pipeline_,
-          rays_pipeline_, average_pipeline_})
+          rays_pipeline_, average_pipeline_, reflect_pipeline_, water_pipeline_})
         vkDestroyPipeline(device_, pipeline, nullptr);
     for (VkRenderPass pass : {pass_r32f_, pass_rg16f_, pass_rgba16f_, pass_target_, pass_average_})
         vkDestroyRenderPass(device_, pass, nullptr);
@@ -857,7 +1047,9 @@ void Effects::destroy() {
     timer_ = VK_NULL_HANDLE;
     timer_next_ = 0u;
     depth_pipeline_ = ao_pipeline_ = blur_pipeline_ = down_pipeline_ = up_pipeline_ = composite_pipeline_ = {};
-    rays_pipeline_ = average_pipeline_ = VK_NULL_HANDLE;
+    rays_pipeline_ = average_pipeline_ = reflect_pipeline_ = water_pipeline_ = VK_NULL_HANDLE;
+    vkDestroyRenderPass(device_, water_pass_, nullptr);
+    water_pass_ = VK_NULL_HANDLE;
     pass_r32f_ = pass_rg16f_ = pass_rgba16f_ = pass_target_ = pass_average_ = {};
     vertex_ = {};
     layout_ = {};
@@ -868,10 +1060,12 @@ void Effects::destroy() {
 }
 
 void Effects::forget(VkImageView color_view) {
-    const auto found = target_framebuffers_.find(color_view);
-    if (found == target_framebuffers_.end()) return;
-    vkDestroyFramebuffer(device_, found->second, nullptr);
-    target_framebuffers_.erase(found);
+    for (auto *framebuffers : {&target_framebuffers_, &water_framebuffers_}) {
+        const auto found = framebuffers->find(color_view);
+        if (found == framebuffers->end()) continue;
+        vkDestroyFramebuffer(device_, found->second, nullptr);
+        framebuffers->erase(found);
+    }
 }
 
 void Effects::run(VkCommandBuffer commands, VkRenderPass pass, VkFramebuffer framebuffer, VkExtent2D extent,
@@ -1022,6 +1216,10 @@ void Effects::record(VkCommandBuffer commands, VkImage color, VkImageView color_
         if (options.sun > 0.0f)
             run(commands, pass_average_, average_.framebuffer, average_.extent, average_pipeline_, average_set_, params);
     }
+    if (water_this_frame_ && options.water > 0.0f)
+        run(commands, pass_average_, reflection_.framebuffer, reflection_.extent, reflect_pipeline_, reflect_set_,
+            params);
+    water_this_frame_ = false;
     if (!occlusion) stamp(commands, slot, 3u);
     if (options.rays > 0.0f && options.sun > 0.0f && shadow_drawn_) {
         Params rays = params;
@@ -1165,6 +1363,8 @@ Options options_from_text(Options options, const std::string &text) {
         else if (name == "g") options.rays_g = value;
         else if (name == "gamesun") options.sun_from_game = value > 0.5f;
         else if (name == "soft") options.softness = value;
+        else if (name == "water") options.water = value;
+        else if (name == "ripples") options.ripples = value;
         else if (name == "reach") options.rays_reach = value;
         else if (name == "debug") options.debug = static_cast<int>(value);
     }
