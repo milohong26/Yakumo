@@ -1249,7 +1249,9 @@ void Effects::record(VkCommandBuffer commands, VkImage color, VkImageView color_
     if ((options.rays > 0.0f || options.beams > 0.0f) && options.sun > 0.0f && bloom) {
         Params rays = params;
         rays.a[0] = 12.0f;
-        rays.a[1] = static_cast<float>(sun_next_ % 64u) * 7.0f;
+        // The same dither every frame: one that moves shimmers at the
+        // game's 30 frames a second.
+        rays.a[1] = 0.0f;
         run(commands, pass_rg16f_, rays_.framebuffer, rays_.extent, rays_pipeline_, rays_set_, rays);
     }
     stamp(commands, slot, 4u);

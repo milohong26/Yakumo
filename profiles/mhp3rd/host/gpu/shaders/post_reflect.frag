@@ -35,7 +35,8 @@ void main() {
         return;
     }
     vec2 size = vec2(textureSize(distances, 0));
-    float noise = ign(gl_FragCoord.xy + sun.water.z * 60.0);
+    // The same dither every frame (the ripples move the reflection anyway).
+    float noise = ign(gl_FragCoord.xy);
     // Steps growing with distance, so near reflections are exact and far
     // ones still reach the hills.
     float step_length = max(dist * 0.025, 5.0);
