@@ -55,7 +55,9 @@ const vec2 kDisc[8] = vec2[](vec2(-0.613, 0.617), vec2(0.170, -0.040), vec2(-0.2
 // what faces it.
 float sunlight(vec3 position, vec3 normal, float noise) {
     vec3 l = sun.direction.xyz;
-    float facing = clamp(dot(normal, l) * 3.0 + 0.15, 0.0, 1.0);
+    // Gently: the normals come from the depth of low-polygon scenery, whose
+    // facets would show, and lit models already turn from their lights.
+    float facing = clamp(dot(normal, l) * 1.6 + 0.35, 0.0, 1.0);
     if (sun.direction.w < 0.5 || facing <= 0.0) return facing;
     vec3 offset = normal * (sun.params.y * 1.5) + l * (sun.params.y * 0.5);
     vec4 s = sun.view_to_shadow * vec4(position + offset, 1.0);

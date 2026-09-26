@@ -316,7 +316,7 @@ The Android app starts from other defaults where a phone differs, with the same 
 | Video | Scaling filter | `video.sharp_screen` | | Smooth or sharp scaling of the finished picture to the window |
 | Video | Texture filter | `video.sharp_textures` | | Smooth (bilinear) or sharp (nearest) texture sampling |
 | Video | Lighting | `video.lighting` | `MHP3RD_LIGHTING` | Remastered (default): lit models are shaded per pixel, with highlights and rim light. Original: the PSP's per-vertex lighting. See [Lighting and effects](#lighting-and-effects) |
-| Video | Image effects | `video.effects` | `MHP3RD_EFFECTS` | On (default) or off: ambient occlusion, bloom, edge smoothing and a colour grade on the 3D scene. See [Lighting and effects](#lighting-and-effects) |
+| Video | Image effects | `video.effects` | `MHP3RD_EFFECTS` | On (default) or off: the sun's light and shadows, light shafts, ambient occlusion, bloom, edge smoothing and a colour grade on the 3D scene. See [Lighting and effects](#lighting-and-effects) |
 | Video | Texture pack | `video.texture_pack` | `MHP3RD_TEXTURE_PACK` | On (default) or off: draw an installed [HD texture pack](#hd-texture-packs) instead of the game's textures. The footer shows how many textures the pack has and how many are on the GPU, or where the pack was looked for |
 | Video | Import texture pack… | `video.texture_pack_folder` | `MHP3RD_TEXTURE_PACK` (a folder) | Empty (default): the pack in `textures/NPJB40001`. A folder: the pack [imported to be used where it is](#importing-a-texture-pack). *Stop using the pack folder* empties it |
 | Video | Vsync | `video.present_mode` | | On (FIFO), or off through mailbox or immediate presentation where the driver offers them |
@@ -377,18 +377,37 @@ How the text is laid out, as traced with `MHP3RD_TRACE_FONT=1`: the game sizes a
 
 ## Lighting and effects
 
-Two settings in the Video section bring the picture closer to a present-day remaster without changing the game's art. Both switch at the next frame; off draws the game exactly as before.
+Two settings in the Video section relight the game like a present-day remaster, or a shader pack. The difference is meant to be seen at a glance, but the game's own art, textures and baked lighting stay underneath. Both switch at the next frame; off draws the game exactly as before.
 
-- **Lighting: Remastered** shades lit models (hunters, monsters, items) per pixel instead of per vertex. The game's own directional lights are evaluated at each pixel and wrap a little past the terminator. The ambient light comes brighter from above than below. Past a knee, light rolls off towards white instead of clipping, so a model lit by two of the game's lights keeps its shape instead of going flat. On top of that come what the PSP could not show: a soft normalised Blinn-Phong highlight of each light with a dielectric Fresnel term, and a rim of sky light at grazing angles. The scenery keeps its baked lighting.
+- **Lighting: Remastered** shades lit models (hunters, monsters, items) per pixel instead of per vertex:
+  - The game's own directional lights are evaluated at each pixel and wrap a little past the terminator.
+  - The ambient light comes brighter from above than below.
+  - Past a knee, light rolls off towards white instead of clipping, so a model lit by two of the game's lights keeps its shape instead of going flat.
+  - On top of that come what the PSP could not show: a soft normalised Blinn-Phong highlight of each light with a dielectric Fresnel term, and a rim of sky light at grazing angles.
 - **Image effects** work on the finished 3D scene, before the interface is drawn over it, so text and menus stay untouched:
-  - ground-truth ambient occlusion (GTAO) from the depth buffer, at half resolution, with a depth-aware denoise and a joint bilateral upsample, fading with the game's fog;
-  - bloom of the brightest light, expanded through an invertible shoulder so pixels no light was added to come out unchanged;
-  - edge anti-aliasing (the scheme of FXAA's quality preset) and contrast-adaptive sharpening elsewhere;
-  - a light grade (contrast on luminance, saturation and vibrance, a warm/cool split, a vignette) and dither.
+  - **Sun and shadows.** The sun is the game's own key light: the brightest directional light that stays fixed in the world, which the game lights its hunters and monsters with.
+    - Before the effects, the scene's solid draws (without the sky's dome, cut out by alpha where the game cuts them) are drawn again from the sun into a 2048x2048 shadow map around the camera.
+    - Every surface then gets the sun's light where the map says it reaches, warm and of the key light's hue and strength, so a night light makes dim blue moonlight. Everything else falls into a cooler shade.
+    - The shadows are soft where they fall far from what casts them and sharp at its foot (percentage-closer soft shadows).
+    - Where nearly the whole view is in shadow, as in a cave, the shade eases.
+    - Beyond the map, the sun's light fades out and the game's own lighting is left.
+  - **Light shafts**: the air lit by the sun, marched through the shadow map at a quarter of the resolution, brightest looking towards the sun.
+  - **Ambient occlusion**: ground-truth ambient occlusion (GTAO) from the depth buffer, at half resolution, with a depth-aware denoise and a joint bilateral upsample, fading with the game's fog.
+  - **Bloom** of the brightest light, expanded through an invertible shoulder so pixels no light was added to come out unchanged.
+  - **Edges**: edge anti-aliasing (the scheme of FXAA's quality preset), and contrast-adaptive sharpening elsewhere.
+  - **Grade**: contrast on luminance, saturation and vibrance, a warm/cool split, a vignette, and dither.
 
-The effects' images, passes and pipelines are made at start and when the resolution changes, never while playing. At about 4.7 megapixels (×6) they take about 2 ms of an Apple M4's GPU per present, and the game keeps 60 frames a second with frame interpolation. The frames interpolated between the game's own replay them at the same point and reuse the game frame's bloom.
+The effects' images, passes and pipelines are made at start and when the resolution changes, never while playing. On an Apple M4 at the display's own size in fullscreen (about 1.8 megapixels), the game keeps 60 frames a second with frame interpolation. The frames interpolated between the game's own replay the effects at the same point, with their own camera, and reuse the game frame's bloom and shadow map.
 
-`MHP3RD_EFFECTS_OPTIONS` tunes the strengths as `name=value` pairs separated by commas: `ao` (0.85), `radius` (42, in the game's units), `bloom` (0.12), `threshold`, `knee`, `cap`, `sharpen` (0.2), `aa` (0.5, 0 turns anti-aliasing off), `exposure`, `contrast` (1.06), `saturation` (1.03), `vibrance` (0.15), `vignette` (0.14), `split` (0.6), `shoulder`; for the lighting `highlight` (0.8), `gloss` (24), `rim` (0.45), `wrap` (0.2), `ground` (0.75) and `knee` (0.6, 0 clips as the PSP does). `shadows` turns on experimental screen-space contact shadows towards the key light (off: without temporal filtering they are noisy). `MHP3RD_EFFECTS_DEBUG` shows one buffer instead of the picture: `1` occlusion, `2` contact shadows, `3` distance, `4` bloom. `MHP3RD_TRACE_EFFECTS=1` times each stage on the GPU (see [Diagnostics](#diagnostics)).
+`MHP3RD_EFFECTS_OPTIONS` tunes the strengths as `name=value` pairs separated by commas. Defaults are in brackets.
+
+| Group | Options |
+| --- | --- |
+| Sun and shadows | `sun` (1.0; 0 turns sunlight and shadows off), `shade` (0.42, how bright shadowed surfaces stay), `warmth` (1.0), `range` (2200, half the width of the ground the shadow map covers, in the game's units), `soft` (0.025, penumbra per unit of distance; 0 keeps shadows evenly sharp), `gamesun` (1; 0 uses `elevation` and `azimuth` in degrees instead of the game's sun), `rays` (0.1), `reach` (2600), `g` (0.7, how much the air scatters towards the sun) |
+| Image | `ao` (1.0), `radius` (42, in the game's units), `bloom` (0.22), `threshold`, `knee`, `cap`, `sharpen` (0.2), `aa` (0.5; 0 turns anti-aliasing off), `exposure`, `contrast` (1.16), `saturation` (1.05), `vibrance` (0.4), `vignette` (0.14), `split` (0.9), `shoulder` |
+| Models | `highlight` (1.2), `gloss` (24), `rim` (0.7), `wrap` (0.2), `ground` (0.75), `knee` (0.6; 0 clips as the PSP does) |
+
+`shadows` turns on experimental screen-space contact shadows towards the sun. `MHP3RD_EFFECTS_LIVE` names a file with the same pairs (commas, spaces or lines between them), read again whenever it changes, for tuning while playing; `debug=N` in it shows a buffer. `MHP3RD_EFFECTS_DEBUG` shows one buffer instead of the picture: `1` occlusion, `2` sunlight and shadows, `3` distance, `4` bloom. `MHP3RD_TRACE_EFFECTS=1` times each stage on the GPU and says why a frame had no effects (see [Diagnostics](#diagnostics)).
 
 ## HD texture packs
 
@@ -689,8 +708,9 @@ The settings a player needs are in the [in-game menu](#in-game-menu). Environmen
 | `MHP3RD_NO_LIGHTING` | off | Draw lit geometry with the flat white stand-in used before lighting existed, and without fog, to compare a scene with and without them |
 | `MHP3RD_NO_FOG` | off | Turn fog off and keep lighting |
 | `MHP3RD_LIGHTING` | on | `0` lights models per vertex as the PSP does, instead of per pixel with highlights and rim light (menu: Lighting). See [Lighting and effects](#lighting-and-effects) |
-| `MHP3RD_EFFECTS` | on | `0` turns off ambient occlusion, bloom, edge smoothing and the colour grade (menu: Image effects) |
+| `MHP3RD_EFFECTS` | on | `0` turns off the sun's light and shadows, light shafts, ambient occlusion, bloom, edge smoothing and the colour grade (menu: Image effects) |
 | `MHP3RD_EFFECTS_OPTIONS` | unset | Strengths of the lighting and effects, `name=value,…`; see [Lighting and effects](#lighting-and-effects) |
+| `MHP3RD_EFFECTS_LIVE` | unset | A file of the same options, read again whenever it changes, for tuning while playing |
 | `MHP3RD_NO_FB_TEXTURES` | off | Decode every texture from guest memory, as before, instead of sampling the render target when the game textures from a framebuffer it drew, and stop writing framebuffers back to guest memory for the shown frame and for GE block transfers |
 | `MHP3RD_TEXTURE_PACK` | unset | `0` turns the [HD texture pack](#hd-texture-packs) off, `1` on; a folder path loads the pack from that folder instead, ahead of an imported one (menu: Texture pack) |
 | `MHP3RD_TEXTURE_PACK_MEMORY` | `1024` | Megabytes of GPU memory for texture pack images; the least recently drawn are dropped above it |
@@ -870,8 +890,9 @@ Safeguards: CMake finds the generated unit that holds the rotation helper and fa
 | `MHP3RD_TRACE_SYNC=1` | Trace semaphores, event flags and mutexes; `MHP3RD_TRACE_SYNC_LIMIT` caps the lines (default 4000) |
 | `MHP3RD_STARVATION_INTERVAL` | Dispatches between virtual-clock advances in code that never calls an import |
 | `MHP3RD_TRACE_GE=1` | Log the first draws of the run with their state |
-| `MHP3RD_TRACE_EFFECTS=1` | An `[effects]` line every 30 presents: the GPU time of the [image effects](#lighting-and-effects) per present, by stage (copies, depth, occlusion, denoise, bloom, composite). Timestamps are written only with this set: on Metal each one splits the work |
-| `MHP3RD_EFFECTS_DEBUG=N` | Show one of the effects' buffers instead of the picture: `1` ambient occlusion, `2` contact shadows, `3` distance, `4` bloom |
+| `MHP3RD_TRACE_EFFECTS=1` | `[effects]` lines every 30 presents: the GPU time of the [image effects](#lighting-and-effects) per present, by stage (copies, depth, occlusion, denoise, bloom, composite); the shadow casters and the sky draws left out; the camera and the scene's directional lights in world space (the game's sun among them); and, for a frame that had no effects, why. Timestamps are written only with this set: on Metal each one splits the work |
+| `MHP3RD_EFFECTS_DUMP` | A file whose appearance (`touch` it) logs every draw of the next frame, one `[dump]` line each: 2D or 3D, target, vertices and bounds, texture, blend, depth, fog, size and distance in the world, and whether the effects were in yet; `@N` logs game frame N |
+| `MHP3RD_EFFECTS_DEBUG=N` | Show one of the effects' buffers instead of the picture: `1` ambient occlusion, `2` sunlight and shadows, `3` distance, `4` bloom |
 | `MHP3RD_SKIP_MOVIES=1` | Skip the movies as a build without FFmpeg does, for scripted runs that should not wait through the intros |
 | `MHP3RD_CHECK_DIRECT_VERTICES=1` | Expand each transformed draw as well and compare it, vertex by vertex and byte for byte, with what its index list names; prints `[direct-check] N draws compared, M differed` every 300 frames. Slow |
 | `MHP3RD_TRACE_STALLS=1` | Where the render thread waits, once a second and for every slow frame; `MHP3RD_TRACE_STALLS_MS` sets what is slow (default 40). See [Where the render thread waits](#where-the-render-thread-waits) |

@@ -87,7 +87,7 @@ struct Options {
     float sun_elevation{52.0f};  // used where the game's own sun is not known
     float sun_azimuth{35.0f};
     bool sun_from_game{true};    // the game's key light, fixed in the world, as the sun
-    float shadow_range{1400.0f};
+    float shadow_range{2200.0f};
     // Penumbra width per unit of distance from the caster (the sun's disc,
     // widened as a shader pack does): shadows are sharp at an object's foot
     // and soften away from it. 0 keeps them evenly sharp.
