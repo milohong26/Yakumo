@@ -142,6 +142,19 @@ bool antialiased(vec2 at, float subpixel, float m, float n, float s, float w, fl
     return true;
 }
 
+// Caustics: the web of light a rippled surface focuses on a shallow floor,
+// as two drifting layers of warped waves whose sum is near zero along thin,
+// bright ridges. `p`: the water's position across the world.
+float caustics(vec2 p, float t) {
+    vec2 q = p * 0.018;
+    vec2 w1 = q + vec2(sin(q.y * 1.3 + t * 0.7), cos(q.x * 1.1 - t * 0.6)) * 0.6;
+    vec2 w2 = q * 1.7 + vec2(cos(q.y * 0.9 - t * 0.5), sin(q.x * 1.2 + t * 0.4)) * 0.7;
+    float c1 = sin(w1.x * 3.1 + t) * sin(w1.y * 2.7 - t * 0.8);
+    float c2 = sin(w2.x * 2.3 - t * 0.9) * sin(w2.y * 3.3 + t * 0.6);
+    float ridge = 1.0 - abs(c1 + c2) * 0.5;
+    return pow(ridge, 7.0);
+}
+
 // Half-resolution visibility at this pixel: the four neighbours, weighted by
 // how close their depth is to this pixel's (a joint bilateral upsample).
 vec2 upsampled_visibility(float dist) {
@@ -259,6 +272,10 @@ void main() {
             vec3 position = view_position(gl_FragCoord.xy, dist);
             vec3 world = (sun.view_to_world * vec4(position, 1.0)).xyz;
             vec3 n = water_normal(world);
+            // The sunlit floor under the water shows through it with the
+            // light the ripples focus on it.
+            float focused = caustics(world.xz, sun.water.z * 1.4);
+            color += color * sun.color.rgb * (focused * 1.6 * vis.y * water * sun.color.w * sun.water.x * clear);
             vec3 v = normalize(-position);
             float fresnel = 0.02 + 0.98 * pow(1.0 - max(dot(n, v), 0.0), 5.0);
             // Softened over a few half-resolution texels, more vertically

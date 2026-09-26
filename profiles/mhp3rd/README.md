@@ -403,7 +403,7 @@ Two settings in the Video section relight the game like a present-day remaster, 
     - The water is found as the game draws it: large surfaces facing up, writing depth, with vertex alpha that is not all opaque. They are either blended and lit (the hot spring) or added (the village's streams); the scenery's unlit grass and dirt layers are left alone.
     - Its draws are drawn again into a mask against the depth they wrote.
     - A half-resolution pass mirrors each water pixel's view about a surface rippled by moving waves and marches it through the scene; what it finds (or the sky's colour) is blended by the Fresnel term.
-    - The sun glints on the water where its shadow map lets it reach.
+    - The sun glints on the water where its shadow map lets it reach, and the ripples focus its light into caustics on the shallow floor seen through it.
   - **Ambient occlusion**: ground-truth ambient occlusion (GTAO) from the depth buffer, at half resolution, with a depth-aware denoise and a joint bilateral upsample, fading with the game's fog.
   - **Bloom** of the brightest light, expanded through an invertible shoulder so pixels no light was added to come out unchanged. Its spread light also falls on the surfaces around it by their own colour, so fires and lanterns light what is near them.
   - **Edges**: edge anti-aliasing (the scheme of FXAA's quality preset), and contrast-adaptive sharpening elsewhere.
