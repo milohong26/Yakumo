@@ -413,7 +413,7 @@ Two settings in the Video section relight the game like a present-day remaster, 
     - They sway in the wind in gusts, more the higher they stand above their model's origin; the frames interpolated between the game's sway between the two frames' times.
     - They are drawn again into a foliage mask, and looking towards the sun they glow with the light coming through them, tinted by their own colour.
 
-The effects' images, passes and pipelines are made at start and when the resolution changes, never while playing. On an Apple M4 at the display's own size in fullscreen (about 1.8 megapixels), the game keeps 60 frames a second with frame interpolation. The frames interpolated between the game's own replay the effects at the same point, with their own camera, and reuse the game frame's bloom and shadow map.
+The effects' images, passes and pipelines are made at start and when the resolution changes, never while playing. On an Apple M4 at the display's own size in fullscreen (about 1.8 megapixels), the game keeps 60 frames a second with frame interpolation. The frames interpolated between the game's own replay the effects at the same point, with their own camera and their own water and foliage, and reuse the game frame's bloom, shadow map, light shafts and bounced light, which are soft and change slowly.
 
 `MHP3RD_EFFECTS_OPTIONS` tunes the strengths as `name=value` pairs separated by commas. Defaults are in brackets.
 
