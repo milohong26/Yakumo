@@ -168,7 +168,7 @@ void main() {
     }
     visibility = pow(clamp(visibility / float(kSlices), 0.0, 1.0), 2.2);
 
-    float light = sun.params.z > 0.5 ? sunlight(centre, normal, noise2) : 1.0;
+    float light = sun.params.z > 0.5 ? sunlight(centre, normal, noise2) * cloud_light(centre) : 1.0;
     // Contact shadow: march towards the light and look for something in front
     // of the ray within a thickness, fading with distance from the camera.
     vec3 to_light = p.light.xyz;

@@ -98,6 +98,12 @@ struct Options {
     // with moving ripples and the sun's glints. 0 turns them off.
     float water{1.0f};
     float ripples{1.0f};
+    // Clouds' shadows drifting over the land: how much they darken the sun,
+    // how much of the sky they cover, and their size in the game's units.
+    // 0 turns them off.
+    float clouds{0.55f};
+    float cloud_cover{0.45f};
+    float cloud_size{1800.0f};
     float rays_g{0.7f};  // how much the air scatters forward, towards the sun (Henyey-Greenstein g)
     float rays_reach{2600.0f};  // how far along a view ray the air is seen, in the game's units
     int debug{};  // 1 occlusion, 2 contact shadows, 3 distance, 4 bloom

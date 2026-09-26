@@ -119,6 +119,7 @@ struct SunBlock {
     float rays[4];
     float view_to_world[16];
     float water[4];
+    float clouds[4];
 };
 
 } // namespace
@@ -795,6 +796,9 @@ void Effects::write_sun(const Camera &camera, const Options &options) {
     block.water[1] = options.ripples;
     block.water[2] = std::fmod(std::chrono::duration<float>(std::chrono::steady_clock::now() - started).count(), 3600.0f);
     block.water[3] = water_this_frame_ && options.water > 0.0f ? 1.0f : 0.0f;
+    block.clouds[0] = options.clouds;
+    block.clouds[1] = std::clamp(options.cloud_cover, 0.0f, 1.0f);
+    block.clouds[2] = std::max(options.cloud_size, 100.0f);
     const std::uint32_t slot = sun_next_++ % kSunSlots;
     sun_offset_ = static_cast<std::uint32_t>(slot * sun_stride_);
     std::memcpy(static_cast<std::uint8_t *>(sun_mapped_) + sun_offset_, &block, sizeof(block));
@@ -1369,6 +1373,9 @@ Options options_from_text(Options options, const std::string &text) {
         else if (name == "soft") options.softness = value;
         else if (name == "water") options.water = value;
         else if (name == "ripples") options.ripples = value;
+        else if (name == "clouds") options.clouds = value;
+        else if (name == "cover") options.cloud_cover = value;
+        else if (name == "cloudsize") options.cloud_size = value;
         else if (name == "reach") options.rays_reach = value;
         else if (name == "debug") options.debug = static_cast<int>(value);
     }

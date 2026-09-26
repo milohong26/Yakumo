@@ -11,7 +11,37 @@ layout(set = 0, binding = 6) uniform Sun {
     vec4 rays;            // x: light shaft strength, y: their reach, z: forward scattering, w: penumbra per unit
     mat4 view_to_world;   // for the water's ripples, which move in the world
     vec4 water;           // x: reflection strength, y: ripples, z: time in seconds, w: 1 when water was drawn
+    vec4 clouds;          // x: how much their shadows darken, y: cover (0 to 1), z: size in world units
 } sun;
+
+float cloud_hash(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+float cloud_noise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(cloud_hash(i), cloud_hash(i + vec2(1.0, 0.0)), f.x),
+               mix(cloud_hash(i + vec2(0.0, 1.0)), cloud_hash(i + vec2(1.0, 1.0)), f.x), f.y);
+}
+
+// How much of the sun the clouds let through at a view-space position: a
+// drifting layer of soft noise high above the world, looked up along the
+// sun's direction, so its shadows lie over hills and valleys as a cloud's.
+float cloud_light(vec3 position) {
+    if (sun.clouds.x <= 0.0) return 1.0;
+    vec3 world = (sun.view_to_world * vec4(position, 1.0)).xyz;
+    vec3 to_sun = normalize(mat3(sun.view_to_world) * sun.direction.xyz);
+    vec2 at = world.xz + to_sun.xz / max(to_sun.y, 0.2) * (2500.0 - world.y);
+    at += vec2(38.0, 14.0) * sun.water.z;
+    vec2 p = at / sun.clouds.z;
+    float n = cloud_noise(p) * 0.6 + cloud_noise(p * 2.3 + 17.0) * 0.3 + cloud_noise(p * 5.1 + 3.0) * 0.1;
+    float cover = sun.clouds.y;
+    float density = smoothstep(1.0 - cover, 1.0 - cover + 0.3, n);
+    return 1.0 - sun.clouds.x * density;
+}
 
 // The water's surface normal in view space at a world position: the world's
 // up, bent by a few moving waves of different lengths and directions.
