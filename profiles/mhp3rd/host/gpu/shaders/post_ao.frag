@@ -64,7 +64,27 @@ float sunlight(vec3 position, vec3 normal, float noise) {
     if (inside <= 0.0 || s.z >= 1.0) return facing;
     float angle = noise * 6.2831853;
     mat2 turn = mat2(cos(angle), sin(angle), -sin(angle), cos(angle));
+    // Percentage-closer soft shadows: the casters' mean depth over a disc
+    // gives how far the shadow falls from them, and the filter widens with
+    // it, as the sun's disc spreads a penumbra.
     float radius = sun.params.x * 1.75;
+    if (sun.rays.w > 0.0) {
+        float search = sun.params.x * 10.0;
+        float blockers = 0.0;
+        float count = 0.0;
+        for (int i = 0; i < 8; ++i) {
+            float d = textureLod(shadow_depths, s.xy + turn * kDisc[i] * search, 0.0).r;
+            if (d < s.z - sun.params.x) {
+                blockers += d;
+                count += 1.0;
+            }
+        }
+        if (count == 0.0) return facing;
+        // Depth across the map spans 12000 units (post_process.cpp).
+        float gap = (s.z - blockers / count) * 12000.0;
+        float penumbra = gap * sun.rays.w / max(sun.params.y, 1e-3);
+        radius = sun.params.x * clamp(penumbra, 1.0, 9.0);
+    }
     float lit = 0.0;
     for (int i = 0; i < 8; ++i)
         lit += texture(shadow_map, vec3(s.xy + turn * kDisc[i] * radius, s.z - sun.params.x * 0.5));

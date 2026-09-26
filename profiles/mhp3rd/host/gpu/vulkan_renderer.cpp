@@ -1099,6 +1099,7 @@ struct VulkanRenderer::Impl {
     // draws that is above the horizon and not the light the game keeps on
     // the camera's axis. Kept from frame to frame.
     std::array<float, 3> game_sun{};
+    std::array<float, 3> game_sun_color{1.0f, 1.0f, 1.0f};
     bool game_sun_known{};
     void note_shadow_caster(const DrawCall &call, VkDescriptorSet texture, const std::array<float, 4> &uv_transform,
                             VkBuffer index_buffer, VkDeviceSize vertex_base, VkDeviceSize index_base,
@@ -3498,6 +3499,9 @@ void VulkanRenderer::Impl::note_scene_draw(const DrawCall &call, const VkViewpor
             if (brightness > best) {
                 best = brightness;
                 game_sun = n;
+                game_sun_color = {static_cast<float>(light.diffuse & 0xFFu) / 255.0f,
+                                  static_cast<float>((light.diffuse >> 8u) & 0xFFu) / 255.0f,
+                                  static_cast<float>((light.diffuse >> 16u) & 0xFFu) / 255.0f};
                 game_sun_known = true;
             }
         }
@@ -3537,6 +3541,7 @@ post::Camera VulkanRenderer::Impl::scene_camera() const {
     if (best->draws == 0u) return post::Camera{};
     post::Camera camera = best->camera;
     camera.sun = game_sun;
+    camera.sun_color = game_sun_color;
     camera.sun_known = game_sun_known;
     return camera;
 }
@@ -5685,7 +5690,12 @@ void VulkanRenderer::begin_frame() {
     impl.reset_scene();
     impl.effects_frame = impl.effects_ready && settings::current().effects;
     impl.per_pixel_frame = settings::current().lighting;
-    if (const char *dump = std::getenv("MHP3RD_EFFECTS_DUMP"); dump != nullptr && std::remove(dump) == 0) {
+    // MHP3RD_EFFECTS_DUMP: a file whose appearance dumps the next frame, or
+    // @N to dump game frame N.
+    static const char *dump = std::getenv("MHP3RD_EFFECTS_DUMP");
+    const bool dump_now = dump != nullptr && (dump[0] == '@' ? impl.frames == std::strtoull(dump + 1, nullptr, 10)
+                                                             : std::remove(dump) == 0);
+    if (dump_now) {
         impl.dump_frame = true;
         impl.dump_index = 0u;
         std::printf("[dump] frame begins\n");
@@ -7376,8 +7386,14 @@ void VulkanRenderer::Impl::replay(VkCommandBuffer commands, std::uint32_t slot, 
     // The lighting effects, where the recorded frame had them.
     const auto apply_effects_here = [&](bool resume) {
         vkCmdEndRenderPass(commands);
-        fx().record(commands, target.color, target.color_view, target.depth, depth_aspect(), older.effects_camera,
-                    effect_options, false);
+        // The in-between camera, as the scenery is drawn with it: the older
+        // frame's moved along the camera's motion. The sun's shadows are
+        // looked up through it and stay put on the ground.
+        post::Camera camera = older.effects_camera;
+        if (camera_motion.valid && t > 0.0f)
+            camera.view = interpolation::multiply(interpolation::rigid_at(camera_motion, t), camera.view);
+        fx().record(commands, target.color, target.color_view, target.depth, depth_aspect(), camera, effect_options,
+                    false);
         if (!resume) return;
         vkCmdBeginRenderPass(commands, &pass, VK_SUBPASS_CONTENTS_INLINE);
         perf::count_render_pass();

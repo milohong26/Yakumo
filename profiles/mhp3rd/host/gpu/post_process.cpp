@@ -301,8 +301,9 @@ bool Effects::create(VkDevice device, VkPhysicalDevice physical_device, VkPipeli
     if (!check(vkCreateSampler(device_, &sampler, nullptr, &shadow_sampler_), "vkCreateSampler (effects)", error))
         return false;
 
-    // Bindings 0-4 and 7: the pass's images; 5: the shadow map; 6: the sun.
-    std::array<VkDescriptorSetLayoutBinding, 8> bindings{};
+    // Bindings 0-4, 7 and 8: the pass's images; 5: the shadow map, compared;
+    // 6: the sun; 9: the shadow map's depths.
+    std::array<VkDescriptorSetLayoutBinding, 10> bindings{};
     for (std::uint32_t i = 0; i < bindings.size(); ++i) {
         bindings[i].binding = i;
         bindings[i].descriptorType =
@@ -340,7 +341,8 @@ bool Effects::create(VkDevice device, VkPhysicalDevice physical_device, VkPipeli
         !make_pipeline(kPostBloomDownShader, sizeof(kPostBloomDownShader), pass_rgba16f_, down_pipeline_, error) ||
         !make_pipeline(kPostBloomUpShader, sizeof(kPostBloomUpShader), pass_rgba16f_, up_pipeline_, error) ||
         !make_pipeline(kPostCompositeShader, sizeof(kPostCompositeShader), pass_target_, composite_pipeline_, error) ||
-        !make_pipeline(kPostRaysShader, sizeof(kPostRaysShader), pass_rg16f_, rays_pipeline_, error))
+        !make_pipeline(kPostRaysShader, sizeof(kPostRaysShader), pass_rg16f_, rays_pipeline_, error) ||
+        !make_pipeline(kPostAverageShader, sizeof(kPostAverageShader), pass_rg16f_, average_pipeline_, error))
         return false;
     if (!make_shadow_resources(error)) return false;
     ready_ = true;
@@ -578,11 +580,21 @@ void Effects::write_sun(const Camera &camera, const Options &options) {
     block.direction[2] = in_view[2];
     block.direction[3] = shadow_drawn_ ? 1.0f : 0.0f;
     // Late-morning sun and the blue of the sky in the shade.
+    // The sun takes the hue and strength of the game's own key light: a
+    // dim, blue light at night makes weak, blue moonlight.
     const float w = options.warmth;
-    block.color[0] = 1.0f;
-    block.color[1] = 1.0f - 0.1f * w;
-    block.color[2] = 1.0f - 0.26f * w;
-    block.color[3] = options.sun;
+    std::array<float, 3> key{1.0f, 1.0f, 1.0f};
+    float strength = 1.0f;
+    if (options.sun_from_game && camera.sun_known) {
+        const std::array<float, 3> &c = camera.sun_color;
+        const float luma = std::max(0.2126f * c[0] + 0.7152f * c[1] + 0.0722f * c[2], 0.01f);
+        for (int i = 0; i < 3; ++i) key[i] = 1.0f + (c[i] / luma - 1.0f) * 0.6f;
+        strength = std::clamp(luma / 0.7f, 0.25f, 1.15f);
+    }
+    block.color[0] = key[0];
+    block.color[1] = key[1] * (1.0f - 0.1f * w);
+    block.color[2] = key[2] * (1.0f - 0.26f * w);
+    block.color[3] = options.sun * strength;
     block.shade[0] = 1.0f - 0.18f * w;
     block.shade[1] = 1.0f - 0.1f * w;
     block.shade[2] = 1.0f + 0.08f * w;
@@ -594,6 +606,9 @@ void Effects::write_sun(const Camera &camera, const Options &options) {
     block.rays[0] = options.rays;
     block.rays[1] = options.rays_reach;
     block.rays[2] = options.rays_g;
+    // World units across the shadow map's depth, and how wide the sun's
+    // disc makes a penumbra per unit of distance to the caster.
+    block.rays[3] = options.softness;
     const std::uint32_t slot = sun_next_++ % kSunSlots;
     sun_offset_ = static_cast<std::uint32_t>(slot * sun_stride_);
     std::memcpy(static_cast<std::uint8_t *>(sun_mapped_) + sun_offset_, &block, sizeof(block));
@@ -650,40 +665,47 @@ void Effects::destroy_image(Image &image) {
     image = Image{};
 }
 
-VkDescriptorSet Effects::make_set(std::array<VkImageView, 6> views, std::array<bool, 6> linear) {
+VkDescriptorSet Effects::make_set(std::array<VkImageView, 7> views, std::array<bool, 7> linear) {
     VkDescriptorSetAllocateInfo allocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     allocate.descriptorPool = pool_;
     allocate.descriptorSetCount = 1u;
     allocate.pSetLayouts = &set_layout_;
     VkDescriptorSet set{};
     if (vkAllocateDescriptorSets(device_, &allocate, &set) != VK_SUCCESS) return VK_NULL_HANDLE;
-    std::array<VkDescriptorImageInfo, 7> images{};
-    std::array<VkWriteDescriptorSet, 8> writes{};
-    for (std::uint32_t i = 0; i < 6u; ++i) {
+    std::array<VkDescriptorImageInfo, 9> images{};
+    std::array<VkWriteDescriptorSet, 10> writes{};
+    for (std::uint32_t i = 0; i < 7u; ++i) {
         // Bindings a pass does not use still get a valid image.
         const VkImageView view = views[i] != VK_NULL_HANDLE ? views[i] : distances_.view;
         images[i] = {linear[i] ? linear_ : nearest_, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
         writes[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
         writes[i].dstSet = set;
-        writes[i].dstBinding = i == 5u ? 7u : i;
+        writes[i].dstBinding = i < 5u ? i : i + 2u;
         writes[i].descriptorCount = 1u;
         writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         writes[i].pImageInfo = &images[i];
     }
-    images[6] = {shadow_sampler_, shadow_.view, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL};
-    writes[6] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    writes[6].dstSet = set;
-    writes[6].dstBinding = 5u;
-    writes[6].descriptorCount = 1u;
-    writes[6].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[6].pImageInfo = &images[6];
-    const VkDescriptorBufferInfo sun{sun_buffer_, 0u, sizeof(SunBlock)};
+    images[7] = {shadow_sampler_, shadow_.view, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL};
     writes[7] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
     writes[7].dstSet = set;
-    writes[7].dstBinding = 6u;
+    writes[7].dstBinding = 5u;
     writes[7].descriptorCount = 1u;
-    writes[7].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
-    writes[7].pBufferInfo = &sun;
+    writes[7].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[7].pImageInfo = &images[7];
+    const VkDescriptorBufferInfo sun{sun_buffer_, 0u, sizeof(SunBlock)};
+    writes[8] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    writes[8].dstSet = set;
+    writes[8].dstBinding = 6u;
+    writes[8].descriptorCount = 1u;
+    writes[8].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+    writes[8].pBufferInfo = &sun;
+    images[8] = {nearest_, shadow_.view, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL};
+    writes[9] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    writes[9].dstSet = set;
+    writes[9].dstBinding = 9u;
+    writes[9].descriptorCount = 1u;
+    writes[9].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[9].pImageInfo = &images[8];
     vkUpdateDescriptorSets(device_, static_cast<std::uint32_t>(writes.size()), writes.data(), 0u, nullptr);
     return set;
 }
@@ -704,7 +726,8 @@ bool Effects::resize(VkExtent2D extent, VkFormat depth_format, std::string &erro
         !make_image(distances_, half, kDistance, kDrawn, VK_IMAGE_ASPECT_COLOR_BIT, pass_r32f_, error) ||
         !make_image(visibility_a_, half, kVisibility, kDrawn, VK_IMAGE_ASPECT_COLOR_BIT, pass_rg16f_, error) ||
         !make_image(visibility_b_, half, kVisibility, kDrawn, VK_IMAGE_ASPECT_COLOR_BIT, pass_rg16f_, error) ||
-        !make_image(rays_, half_of(extent, 2), kVisibility, kDrawn, VK_IMAGE_ASPECT_COLOR_BIT, pass_rg16f_, error)) {
+        !make_image(rays_, half_of(extent, 2), kVisibility, kDrawn, VK_IMAGE_ASPECT_COLOR_BIT, pass_rg16f_, error) ||
+        !make_image(average_, {1u, 1u}, kVisibility, kDrawn, VK_IMAGE_ASPECT_COLOR_BIT, pass_rg16f_, error)) {
         destroy_sized();
         return false;
     }
@@ -717,7 +740,7 @@ bool Effects::resize(VkExtent2D extent, VkFormat depth_format, std::string &erro
         }
     }
     const std::array<VkDescriptorPoolSize, 2> sizes{
-        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 7u * 32u},
+        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 9u * 32u},
         VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 32u}};
     VkDescriptorPoolCreateInfo pool{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     pool.maxSets = 32u;
@@ -737,9 +760,10 @@ bool Effects::resize(VkExtent2D extent, VkFormat depth_format, std::string &erro
         up_sets_[i] = make_set({i == kBloomLevels - 1 ? down_[i].view : up_[i + 1].view, down_[i].view}, {L, L});
     }
     composite_set_ = make_set({scene_color_.view, scene_depth_.view, distances_.view, visibility_b_.view, up_[0].view,
-                               rays_.view},
-                              {L, N, N, L, L, L});
+                               rays_.view, average_.view},
+                              {L, N, N, L, L, L, N});
     rays_set_ = make_set({distances_.view}, {N});
+    average_set_ = make_set({visibility_b_.view, distances_.view}, {N, N});
     sized_ = true;
     primed_ = false;
     return true;
@@ -765,7 +789,7 @@ void Effects::prime(VkCommandBuffer commands) {
     if (primed_) return;
     primed_ = true;
     std::vector<std::pair<Image *, float>> images{
-        {&distances_, 1.0e6f}, {&visibility_a_, 1.0f}, {&visibility_b_, 1.0f}, {&rays_, 0.0f}};
+        {&distances_, 1.0e6f}, {&visibility_a_, 1.0f}, {&visibility_b_, 1.0f}, {&rays_, 0.0f}, {&average_, 1.0f}};
     for (Image &image : down_) images.push_back({&image, 0.0f});
     for (Image &image : up_) images.push_back({&image, 0.0f});
     for (const auto &[image, value] : images) {
@@ -794,6 +818,7 @@ void Effects::destroy_sized() {
     destroy_image(visibility_a_);
     destroy_image(visibility_b_);
     destroy_image(rays_);
+    destroy_image(average_);
     for (Image &image : down_) destroy_image(image);
     for (Image &image : up_) destroy_image(image);
 }
@@ -803,7 +828,7 @@ void Effects::destroy() {
     destroy_sized();
     for (VkPipeline pipeline :
          {depth_pipeline_, ao_pipeline_, blur_pipeline_, down_pipeline_, up_pipeline_, composite_pipeline_,
-          rays_pipeline_})
+          rays_pipeline_, average_pipeline_})
         vkDestroyPipeline(device_, pipeline, nullptr);
     for (VkRenderPass pass : {pass_r32f_, pass_rg16f_, pass_rgba16f_, pass_target_})
         vkDestroyRenderPass(device_, pass, nullptr);
@@ -830,7 +855,7 @@ void Effects::destroy() {
     timer_ = VK_NULL_HANDLE;
     timer_next_ = 0u;
     depth_pipeline_ = ao_pipeline_ = blur_pipeline_ = down_pipeline_ = up_pipeline_ = composite_pipeline_ = {};
-    rays_pipeline_ = VK_NULL_HANDLE;
+    rays_pipeline_ = average_pipeline_ = VK_NULL_HANDLE;
     pass_r32f_ = pass_rg16f_ = pass_rgba16f_ = pass_target_ = {};
     vertex_ = {};
     layout_ = {};
@@ -992,6 +1017,8 @@ void Effects::record(VkCommandBuffer commands, VkImage color, VkImageView color_
         run(commands, pass_rg16f_, visibility_a_.framebuffer, visibility_a_.extent, ao_pipeline_, ao_set_, ao);
         stamp(commands, slot, 3u);
         run(commands, pass_rg16f_, visibility_b_.framebuffer, visibility_b_.extent, blur_pipeline_, blur_set_, params);
+        if (options.sun > 0.0f)
+            run(commands, pass_rg16f_, average_.framebuffer, average_.extent, average_pipeline_, average_set_, params);
     }
     if (!occlusion) stamp(commands, slot, 3u);
     if (options.rays > 0.0f && options.sun > 0.0f && shadow_drawn_) {
@@ -1135,6 +1162,7 @@ Options options_from_text(Options options, const std::string &text) {
         else if (name == "warmth") options.warmth = value;
         else if (name == "g") options.rays_g = value;
         else if (name == "gamesun") options.sun_from_game = value > 0.5f;
+        else if (name == "soft") options.softness = value;
         else if (name == "reach") options.rays_reach = value;
         else if (name == "debug") options.debug = static_cast<int>(value);
     }

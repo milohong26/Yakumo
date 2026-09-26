@@ -33,6 +33,7 @@ struct Camera {
     float depth_max{};
     std::array<float, 3> sun{};    // world-space direction towards the game's sun
     bool sun_known{};              // ...found among the lights of its lit draws
+    std::array<float, 3> sun_color{1.0f, 1.0f, 1.0f};  // its diffuse colour, 0 to 1
     std::array<float, 3> light{};  // view-space direction towards the key light
     float light_strength{};        // 0: no key light
     bool fog{};                    // the scene is drawn with the GE's fog
@@ -50,7 +51,7 @@ struct Options {
     float shadow_distance{1500.0f};
     // Bloom works on light above the shoulder's knee, expanded as if the
     // picture had not been clipped to white (up to bloom_cap).
-    float bloom{0.25f};
+    float bloom{0.2f};
     float bloom_threshold{1.0f};
     float bloom_knee{0.5f};
     float bloom_cap{3.0f};
@@ -80,15 +81,19 @@ struct Options {
     // light of the sun's colour; shadowed ones fall to `shade` of their
     // brightness. `shadow_range`: half the width of the ground the shadow
     // map covers around the camera, in the game's units.
-    float sun{0.9f};
-    float shade{0.45f};
+    float sun{0.8f};
+    float shade{0.47f};
     float warmth{1.0f};  // how far sunlight leans towards gold and shade towards blue
     float sun_elevation{52.0f};  // used where the game's own sun is not known
     float sun_azimuth{35.0f};
     bool sun_from_game{true};    // the game's key light, fixed in the world, as the sun
     float shadow_range{1400.0f};
+    // Penumbra width per unit of distance from the caster (the sun's disc,
+    // widened as a shader pack does): shadows are sharp at an object's foot
+    // and soften away from it. 0 keeps them evenly sharp.
+    float softness{0.025f};
     // Light shafts through the air where the sun reaches it; 0 turns them off.
-    float rays{0.2f};
+    float rays{0.1f};
     float rays_g{0.7f};  // how much the air scatters forward, towards the sun (Henyey-Greenstein g)
     float rays_reach{2600.0f};  // how far along a view ray the air is seen, in the game's units
     int debug{};  // 1 occlusion, 2 contact shadows, 3 distance, 4 bloom
@@ -159,8 +164,9 @@ private:
     bool make_pass(VkFormat format, bool keep_target, VkRenderPass &pass, std::string &error);
     bool make_pipeline(const std::uint32_t *fragment, std::size_t bytes, VkRenderPass pass, VkPipeline &pipeline,
                        std::string &error);
-    // Views for bindings 0-4 and 7 (views[5]); null takes a stand-in.
-    VkDescriptorSet make_set(std::array<VkImageView, 6> views, std::array<bool, 6> linear);
+    // Views for bindings 0-4, 7 (views[5]) and 8 (views[6]); null takes a
+    // stand-in.
+    VkDescriptorSet make_set(std::array<VkImageView, 7> views, std::array<bool, 7> linear);
     void write_sun(const Camera &camera, const Options &options);
     bool make_shadow_resources(std::string &error);
     void run(VkCommandBuffer commands, VkRenderPass pass, VkFramebuffer framebuffer, VkExtent2D extent,
@@ -193,6 +199,7 @@ private:
     VkPipeline up_pipeline_{};
     VkPipeline composite_pipeline_{};
     VkPipeline rays_pipeline_{};
+    VkPipeline average_pipeline_{};
 
     // Bloom from a quarter of the target's size down, in three levels.
     static constexpr int kBloomLevels = 3;
@@ -201,7 +208,8 @@ private:
     Image distances_;
     Image visibility_a_;
     Image visibility_b_;
-    Image rays_;  // a quarter of the target: light shafts
+    Image rays_;     // a quarter of the target: light shafts
+    Image average_;  // 1x1: how much of the scene the sun reaches
     std::array<Image, kBloomLevels> down_{};
     std::array<Image, kBloomLevels> up_{};
     VkDescriptorPool pool_{};
@@ -212,6 +220,7 @@ private:
     std::array<VkDescriptorSet, kBloomLevels> up_sets_{};
     VkDescriptorSet composite_set_{};
     VkDescriptorSet rays_set_{};
+    VkDescriptorSet average_set_{};
     std::map<VkImageView, VkFramebuffer> target_framebuffers_;
 
     // The sun's shadow map, made once, and what it was drawn with.
