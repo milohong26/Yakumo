@@ -318,6 +318,8 @@ The Android app starts from other defaults where a phone differs, with the same 
 | Video | Texture filter | `video.sharp_textures` | | Smooth (bilinear) or sharp (nearest) texture sampling |
 | Video | Lighting | `video.lighting` | `MHP3RD_LIGHTING` | Remastered (default): lit models are shaded per pixel, with highlights and rim light. Original: the PSP's per-vertex lighting. See [Lighting and effects](#lighting-and-effects) |
 | Video | Look | `video.look` | | How strong the image effects are: `0` Subtle (half way to the original), `1` Remastered (the default), `2` Vivid (the sun, shade and colour pushed further) |
+| Video | Water reflections | `video.reflections` | | On (default) or off: the image effects' water reflections, ripples, glints and caustics |
+| Video | Foliage | `video.wind` | | Wind and sunlight (default) or still: leaves, grass and banners sway and glow with the sun behind them |
 | Video | Image effects | `video.effects` | `MHP3RD_EFFECTS` | On (default) or off: the sun's light and shadows, light shafts, water reflections, ambient occlusion, bloom, edge smoothing and a colour grade on the 3D scene. See [Lighting and effects](#lighting-and-effects) |
 | Video | Texture pack | `video.texture_pack` | `MHP3RD_TEXTURE_PACK` | On (default) or off: draw an installed [HD texture pack](#hd-texture-packs) instead of the game's textures. The footer shows how many textures the pack has and how many are on the GPU, or where the pack was looked for |
 | Video | Import texture pack… | `video.texture_pack_folder` | `MHP3RD_TEXTURE_PACK` (a folder) | Empty (default): the pack in `textures/NPJB40001`. A folder: the pack [imported to be used where it is](#importing-a-texture-pack). *Stop using the pack folder* empties it |
@@ -379,7 +381,7 @@ How the text is laid out, as traced with `MHP3RD_TRACE_FONT=1`: the game sizes a
 
 ## Lighting and effects
 
-Two settings in the Video section relight the game like a present-day remaster, or a shader pack. The difference is meant to be seen at a glance, but the game's own art, textures and baked lighting stay underneath. Both switch at the next frame; off draws the game exactly as before. F4, or a DualSense's touchpad click, flips between the original and the remastered look while playing, to compare, without changing the settings. *Look* in the same section makes the effects Subtle, Remastered (the default) or Vivid.
+Two settings in the Video section relight the game like a present-day remaster, or a shader pack. The difference is meant to be seen at a glance, but the game's own art, textures and baked lighting stay underneath. Both switch at the next frame; off draws the game exactly as before. F4, or a DualSense's touchpad click, flips between the original and the remastered look while playing, to compare, without changing the settings. *Look* in the same section makes the effects Subtle, Remastered (the default) or Vivid, and *Water reflections* and *Foliage* turn those two parts off on their own: they find water and foliage by how the game draws them, which an area may draw otherwise.
 
 - **Lighting: Remastered** shades lit models (hunters, monsters, items) per pixel instead of per vertex:
   - The game's own directional lights are evaluated at each pixel and wrap a little past the terminator.

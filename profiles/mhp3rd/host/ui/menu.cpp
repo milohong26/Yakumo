@@ -333,6 +333,30 @@ void Menu::video() {
             settings::save();
         }
     }
+    {
+        RowOptions o = options_for("video.reflections", "The water mirrors the scene and the sky, with ripples, the "
+                                                        "sun's glints and light on the floor under it.");
+        if (!s.effects) {
+            o.disabled = true;
+            o.note = "Image effects are off";
+        }
+        if (choice_row("Water reflections", s.reflections ? "On" : "Off", o)) {
+            s.reflections = !s.reflections;
+            settings::save();
+        }
+    }
+    {
+        RowOptions o = options_for("video.wind", "Leaves, grass and banners sway in the wind and glow with the sun "
+                                                 "behind them.");
+        if (!s.effects) {
+            o.disabled = true;
+            o.note = "Image effects are off";
+        }
+        if (choice_row("Foliage", s.wind ? "Wind and sunlight" : "Still", o)) {
+            s.wind = !s.wind;
+            settings::save();
+        }
+    }
     if (choice_row("Image effects", s.effects ? "On" : "Off",
                    options_for("video.effects", "The sun's light and shadows, light shafts, water reflections, "
                                                 "ambient occlusion, bloom, edge smoothing and a colour grade on the "
@@ -479,6 +503,8 @@ void Menu::video() {
         restore("video.lighting", s.lighting, d.lighting);
         restore("video.effects", s.effects, d.effects);
         restore("video.look", s.look, d.look);
+        restore("video.reflections", s.reflections, d.reflections);
+        restore("video.wind", s.wind, d.wind);
         restore("video.texture_pack", s.texture_pack, d.texture_pack);
         restore("video.present_mode", s.present_mode, d.present_mode);
         restore("video.frame_rate", s.frame_rate, d.frame_rate);

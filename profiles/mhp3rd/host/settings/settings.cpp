@@ -168,6 +168,8 @@ const std::vector<Field> &fields() {
          [](Settings &s, const char *t) { s.effects = variable_flag(t); }},
         {"video.look", nullptr, [](Settings &s, const std::string &t) { return parse_uint(t, 0u, 2u, s.look); },
          [](const Settings &s) { return std::to_string(s.look); }, nullptr},
+        BOOL_FIELD("video.reflections", reflections),
+        BOOL_FIELD("video.wind", wind),
         {"video.lighting", "MHP3RD_LIGHTING",
          [](Settings &s, const std::string &t) { return parse_bool(t, s.lighting); },
          [](const Settings &s) { return std::string(s.lighting ? "1" : "0"); },

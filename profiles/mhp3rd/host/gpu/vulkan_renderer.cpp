@@ -6011,6 +6011,11 @@ void VulkanRenderer::begin_frame() {
         }
     }
     impl.effect_options = post::options_for_look(effects_options, settings::current().look);
+    if (!settings::current().reflections) impl.effect_options.water = 0.0f;
+    if (!settings::current().wind) {
+        impl.effect_options.wind = 0.0f;
+        impl.effect_options.translucency = 0.0f;
+    }
     impl.shadow_frame = impl.effects_frame && impl.fx().shadow_pipeline() != VK_NULL_HANDLE &&
                         impl.effect_options.sun > 0.0f;
 }
@@ -6816,14 +6821,17 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
         }
     }
     // The scene's water, for the reflections.
-    const bool water = impl.effects_frame && !raw && !call.through && looks_like_water(call, texture_average);
+    const bool water = impl.effects_frame && impl.effect_options.water > 0.0f && !raw && !call.through &&
+                       looks_like_water(call, texture_average);
     impl.current_draw_water = water;
     // The scenery's foliage: unlit, alpha tested, with a texture cut out by
     // its alpha (leaves, grass tufts, banners). It sways in the wind and
     // lets the sun through.
     // Small draws only: the far hills painted on cut-out panoramas and large
     // carved rocks are cut out too.
-    const bool foliage = impl.effects_frame && texture_cutout && !call.through && !call.clear_mode && !raw &&
+    const bool foliage = impl.effects_frame && texture_cutout &&
+                         (impl.effect_options.wind > 0.0f || impl.effect_options.translucency > 0.0f) &&
+                         !call.through && !call.clear_mode && !raw &&
                          !call.lighting_enabled && call.alpha_test.enabled &&
                          (!call.blend.enabled || call.blend.destination_factor == 3u) &&
                          (call.alpha_test.function == 6u || call.alpha_test.function == 7u) &&
