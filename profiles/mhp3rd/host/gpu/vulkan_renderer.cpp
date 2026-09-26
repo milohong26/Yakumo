@@ -3776,7 +3776,11 @@ bool looks_like_water(const DrawCall &call, const std::array<float, 3> &texture_
     for (const Vertex &vertex : call.vertices) alpha_hi = std::max(alpha_hi, vertex.color >> 24u);
     if (alpha_hi >= 240u && !watery) return false;
     const WorldSphere sphere = world_sphere(call, true);
-    return sphere.known && sphere.up > (watery ? 0.8f : 0.97f) && sphere.radius > (watery ? 30.0f : 100.0f);
+    if (!sphere.known || sphere.up <= (watery ? 0.8f : 0.97f) || sphere.radius <= (watery ? 30.0f : 100.0f))
+        return false;
+    // Water lies below the eye: a layer of cloud or mist overhead is flat
+    // too.
+    return sphere.centre[1] < camera_position(call.view)[1];
 }
 
 // A draw of the scene that casts the sun's shadows: solid (or cut out by
@@ -6821,6 +6825,7 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     // carved rocks are cut out too.
     const bool foliage = impl.effects_frame && texture_cutout && !call.through && !call.clear_mode && !raw &&
                          !call.lighting_enabled && call.alpha_test.enabled &&
+                         (!call.blend.enabled || call.blend.destination_factor == 3u) &&
                          (call.alpha_test.function == 6u || call.alpha_test.function == 7u) &&
                          !interpolation::is_orthographic(call.projection) && impl.sphere_of(call).radius < 3500.0f;
     impl.current_draw_foliage = foliage;
