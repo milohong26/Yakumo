@@ -94,6 +94,8 @@ if(MHP3RD_RENDERER)
             "kPostBounceShader=${MHP3RD_POST_SHADER_DIR}/post_bounce.frag"
             "kWaterVertexShader=${MHP3RD_POST_SHADER_DIR}/water.vert"
             "kWaterFragmentShader=${MHP3RD_POST_SHADER_DIR}/water.frag"
+            "kFoliageVertexShader=${MHP3RD_POST_SHADER_DIR}/foliage.vert"
+            "kFoliageFragmentShader=${MHP3RD_POST_SHADER_DIR}/foliage.frag"
             "kShadowVertexShader=${MHP3RD_POST_SHADER_DIR}/shadow.vert"
             "kShadowFragmentShader=${MHP3RD_POST_SHADER_DIR}/shadow.frag")
         set(MHP3RD_POST_SHADER_SOURCES ${MHP3RD_POST_SHADERS})

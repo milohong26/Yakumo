@@ -10,11 +10,11 @@ layout(set = 0, binding = 6) uniform Sun {
     vec4 params;          // x: a shadow map texel, y: world units per texel, z: 1 sun on, w: shadow range
     vec4 rays;            // x: light shaft strength, y: their reach, z: forward scattering, w: penumbra per unit
     mat4 view_to_world;   // for the water's ripples, which move in the world
-    vec4 water;           // x: reflection strength, y: ripples, z: time in seconds, w: 1 when water was drawn
+    vec4 water;           // x: reflection strength, y: ripples, z: time in seconds, w: 1 when the mask was drawn
     vec4 clouds;          // x: how much their shadows darken, y: cover (0 to 1), z: size in world units,
                           // w: how much bright light lights the surfaces around it
     vec4 bounce;          // x: how much sunlight bounces off what it lights, y: screen-space beams' strength,
-                          // z: the sun's disc
+                          // z: the sun's disc, w: leaves' translucency
 } sun;
 
 float cloud_hash(vec2 p) {

@@ -548,8 +548,36 @@ struct DecodeJob {
     TextureSnapshot snapshot;
     std::vector<std::uint32_t> pixels;
     bool ok{};
+    std::int8_t cutout{-1};  // see cutout_of
+    float share{};
+    float flips{};
     std::atomic<bool> done{};
 };
+
+// Whether a texture is cut out by its alpha into many small shapes, as
+// leaves, grass and paper are: a good share of its texels transparent, but
+// not all, and the alpha flipping between clear and solid often along its
+// rows. The game tests alpha on most of its scenery: rock and wood textures
+// are opaque, and a carved rock's texture with a clear border flips rarely.
+// 1: cut out, 0: not.
+// `share` and `flips` get the transparent share and the flips per texel,
+// for MHP3RD_EFFECTS_DUMP.
+std::int8_t cutout_of(const std::vector<std::uint32_t> &pixels, float &share_out, float &flips_out) {
+    if (pixels.empty()) return 0;
+    std::size_t clear = 0u, flips = 0u;
+    bool before = (pixels[0] >> 24u) < 128u;
+    for (const std::uint32_t pixel : pixels) {
+        const bool now = (pixel >> 24u) < 128u;
+        clear += now ? 1u : 0u;
+        flips += now != before ? 1u : 0u;
+        before = now;
+    }
+    const double count = static_cast<double>(pixels.size());
+    const double share = static_cast<double>(clear) / count;
+    share_out = static_cast<float>(share);
+    flips_out = static_cast<float>(static_cast<double>(flips) / count);
+    return share > 0.06 && share < 0.97 && static_cast<double>(flips) / count > 0.02 ? 1 : 0;
+}
 
 class DecodePool {
 public:
@@ -593,6 +621,7 @@ public:
 private:
     void run(DecodeJob &job) {
         job.ok = decode_snapshot(job.snapshot, job.pixels);
+        if (job.ok) job.cutout = cutout_of(job.pixels, job.share, job.flips);
         {
             std::lock_guard<std::mutex> guard(lock_);
             job.done.store(true, std::memory_order_release);
@@ -635,7 +664,15 @@ struct VulkanRenderer::Impl {
         // How far down a 512-tall texture has been drawn, which decides how
         // much of it the pack's hash covers; see texture_pack.hpp.
         std::uint16_t max_seen_v{};
+        // Cut out by its alpha (cutout_of): -1 until its decode is done.
+        std::int8_t cutout{-1};
+        std::shared_ptr<DecodeJob> job;  // the background decode, until its cutout is taken
+        float share{};  // cutout_of's measures
+        float flips{};
     };
+    bool last_texture_cutout{};  // texture_descriptor's texture is cut out
+    float last_texture_share{};
+    float last_texture_flips{};
 
     RendererConfig config;
     SDL_Window *window{};
@@ -1091,22 +1128,26 @@ struct VulkanRenderer::Impl {
     };
     std::vector<ShadowCaster> shadow_casters;
     bool shadow_frame{};  // this frame's casters are being kept
-    // The scene's water surfaces as drawn (looks_like_water), drawn again
-    // into the water mask before the effects.
+    // The scene's water surfaces (looks_like_water) and foliage (leaves,
+    // grass and cloth cut out by alpha) as drawn, drawn again into the water
+    // mask's two channels before the effects.
     struct WaterDraw {
-        std::array<float, 16> transform{};
+        PushConstants push{};
+        VkDescriptorSet texture{};  // a foliage draw's, for its cut-outs
         VkViewport viewport{};
         VkRect2D scissor{};
         VkBuffer index_buffer{};
         VkDeviceSize vertex_base{};
         VkDeviceSize index_base{};
         std::uint32_t count{};
+        bool foliage{};
     };
     std::vector<WaterDraw> water_draws;
-    bool current_draw_water{};  // the draw being submitted is water (for its replay group)
-    void note_water(const DrawCall &call, bool water, const PushConstants &push, const VkViewport &viewport,
-                    const VkRect2D &scissor, VkBuffer index_buffer, VkDeviceSize vertex_base, VkDeviceSize index_base,
-                    std::uint32_t count);
+    bool current_draw_water{};    // the draw being submitted is water (for its replay group)
+    bool current_draw_foliage{};  // ...or foliage
+    void note_water(const DrawCall &call, bool water, bool foliage, const PushConstants &push, VkDescriptorSet texture,
+                    const VkViewport &viewport, const VkRect2D &scissor, VkBuffer index_buffer,
+                    VkDeviceSize vertex_base, VkDeviceSize index_base, std::uint32_t count);
     void draw_water(VkCommandBuffer commands, const Target &target, const std::vector<WaterDraw> &draws);
     std::uint32_t shadow_skipped_sky{};
     // MHP3RD_TRACE_EFFECTS: the lights of the frame's first lit scene draw,
@@ -1507,6 +1548,7 @@ struct VulkanRenderer::Impl {
         std::uint32_t skinned{kNone}; // FrameRecord::skinned: the vertices of a group of skinned draws
         bool raw{};                   // drawn from the guest's vertex bytes at vertex_base (first instance)
         bool water{};                 // the scene's water, drawn again into the water mask
+        bool foliage{};               // the scene's foliage, drawn again into its channel
         std::uint32_t raw_block{kNone}; // FrameRecord::raws: its format and bones
     };
     struct FrameRecord {
@@ -2501,7 +2543,8 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
             std::cout << "[render] sun shadows unavailable: " << shadow_error << "\n";
         std::string water_error;
         if (!impl.fx().make_water_pipeline(impl.pipeline_layout, impl.depth_format, sizeof(GpuVertex),
-                                           offsetof(GpuVertex, x), offsetof(GpuVertex, color), water_error))
+                                           offsetof(GpuVertex, x), offsetof(GpuVertex, color), offsetof(GpuVertex, u),
+                                           water_error))
             std::cout << "[render] water reflections unavailable: " << water_error << "\n";
     }
 
@@ -3765,26 +3808,46 @@ void VulkanRenderer::Impl::draw_shadows(const post::Camera &camera) {
     forget_bindings();
 }
 
-void VulkanRenderer::Impl::note_water(const DrawCall &call, bool water, const PushConstants &push,
-                                      const VkViewport &viewport, const VkRect2D &scissor, VkBuffer index_buffer,
-                                      VkDeviceSize vertex_base, VkDeviceSize index_base, std::uint32_t count) {
-    if (!water || !effects_frame || effects_applied || count == 0u || !shows(call.target.color_address) ||
-        water_draws.size() >= 4096u)
+void VulkanRenderer::Impl::note_water(const DrawCall &call, bool water, bool foliage, const PushConstants &push,
+                                      VkDescriptorSet texture, const VkViewport &viewport, const VkRect2D &scissor,
+                                      VkBuffer index_buffer, VkDeviceSize vertex_base, VkDeviceSize index_base,
+                                      std::uint32_t count) {
+    if (!(water || foliage) || !effects_frame || effects_applied || count == 0u || !shows(call.target.color_address) ||
+        water_draws.size() >= 8192u)
         return;
-    water_draws.push_back({push.transform, viewport, scissor, index_buffer, vertex_base, index_base, count});
+    // Foliage only as far as the sun's light reaches in the composite (a
+    // little past the shadow map), not the leaves painted on far hills.
+    if (foliage && !water) {
+        const WorldSphere sphere = world_sphere(call);
+        const std::array<float, 3> eye = camera_position(call.view);
+        const float dx = sphere.centre[0] - eye[0], dy = sphere.centre[1] - eye[1], dz = sphere.centre[2] - eye[2];
+        if (std::sqrt(dx * dx + dy * dy + dz * dz) - sphere.radius > effect_options.shadow_range * 2.2f) return;
+    }
+    water_draws.push_back({push, texture, viewport, scissor, index_buffer, vertex_base, index_base, count, foliage});
 }
 
 void VulkanRenderer::Impl::draw_water(VkCommandBuffer commands, const Target &target,
                                       const std::vector<WaterDraw> &draws) {
     if (draws.empty() || fx().water_pipeline() == VK_NULL_HANDLE) return;
     if (!fx().begin_water(commands, target.color_view, target.depth_view)) return;
-    PushConstants push{};
+    bool foliage_bound = false;
+    VkDescriptorSet bound_texture = VK_NULL_HANDLE;
     for (const WaterDraw &draw : draws) {
+        if (draw.foliage && fx().foliage_pipeline() == VK_NULL_HANDLE) continue;
+        if (draw.foliage != foliage_bound) {
+            vkCmdBindPipeline(commands, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                              draw.foliage ? fx().foliage_pipeline() : fx().water_pipeline());
+            foliage_bound = draw.foliage;
+        }
+        if (draw.foliage && draw.texture != bound_texture && draw.texture != VK_NULL_HANDLE) {
+            vkCmdBindDescriptorSets(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout, 0u, 1u, &draw.texture,
+                                    0u, nullptr);
+            bound_texture = draw.texture;
+        }
         vkCmdSetViewport(commands, 0u, 1u, &draw.viewport);
         vkCmdSetScissor(commands, 0u, 1u, &draw.scissor);
-        push.transform = draw.transform;
         vkCmdPushConstants(commands, pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0u,
-                           sizeof(push), &push);
+                           sizeof(draw.push), &draw.push);
         vkCmdBindVertexBuffers(commands, 0u, 1u, &vertex_buffer, &draw.vertex_base);
         if (draw.index_buffer != VK_NULL_HANDLE) {
             const VkDeviceSize aligned = draw.index_base & ~VkDeviceSize{3u};
@@ -4342,6 +4405,8 @@ VulkanRenderer::Impl::Texture &VulkanRenderer::Impl::texture_for(const GuestMemo
     Texture texture = job ? create_texture_image(state.width, state.height)
                           : create_texture(state.width, state.height, pixels.data());
     if (texture.descriptor == VK_NULL_HANDLE) return white_texture;
+    if (job) texture.job = job;
+    else texture.cutout = cutout_of(pixels, texture.share, texture.flips);
     if (job) {
         if (!decode_pool) {
             const std::uint32_t cores = std::max(1u, std::thread::hardware_concurrency());
@@ -4363,6 +4428,15 @@ VulkanRenderer::Impl::Texture &VulkanRenderer::Impl::texture_for(const GuestMemo
 VkDescriptorSet VulkanRenderer::Impl::texture_descriptor(const GuestMemory &memory, const DrawCall &call) {
     const perf::SplitScope split(perf::Split::Texture);
     Texture &texture = texture_for(memory, call);
+    if (texture.cutout < 0 && texture.job && texture.job->done.load(std::memory_order_acquire)) {
+        texture.cutout = texture.job->ok ? texture.job->cutout : 0;
+        texture.share = texture.job->share;
+        texture.flips = texture.job->flips;
+        texture.job.reset();
+    }
+    last_texture_cutout = texture.cutout == 1;
+    last_texture_share = texture.share;
+    last_texture_flips = texture.flips;
     if (texture.replacement && pack) {
         // Until the image is decoded and on the GPU, the original is drawn.
         if (const VkDescriptorSet replaced = replacements.descriptor(*texture.replacement, *pack, frames)) {
@@ -5994,7 +6068,9 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     static const bool no_lighting = std::getenv("MHP3RD_NO_LIGHTING") != nullptr;
     static const bool no_fog = no_lighting || std::getenv("MHP3RD_NO_FOG") != nullptr;
     const bool lit = call.lighting_enabled && !no_lighting && !call.through && !call.clear_mode;
-    // The scene's water, for the reflections.
+    // The scene's water, for the reflections, and its foliage (unlit and cut
+    // out by alpha: leaves, grass tufts, banners), which sways in the wind
+    // and lets the sun through.
     const bool water = impl.effects_frame && !raw && !call.through && looks_like_water(call);
     impl.current_draw_water = water;
     // Lit per pixel: opaque and alpha-blended models, not the additive glows
@@ -6599,15 +6675,6 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     push.viewport = {static_cast<float>(kPspWidth), static_cast<float>(kPspHeight), call.through ? 1.0f : 0.0f,
                      (fogged ? kPushFog : 0.0f) + (lit ? kPushLighting : 0.0f) + (per_pixel ? kPushPerPixel : 0.0f)};
     push.view_z = {view_world[2], view_world[6], view_world[10], view_world[14]};
-    // The scenery's cut-out leaves, grass and cloth sway in the wind.
-    if (impl.effects_frame && impl.effect_options.wind > 0.0f && !call.through && !call.clear_mode && !raw &&
-        !call.lighting_enabled && call.texture.enabled && call.alpha_test.enabled &&
-        (call.alpha_test.function == 6u || call.alpha_test.function == 7u) &&
-        !interpolation::is_orthographic(call.projection)) {
-        push.viewport[0] = impl.wind_time;
-        push.viewport[1] = impl.effect_options.wind;
-        push.viewport[3] += kPushWind;
-    }
     push.texture_params = {call.texture.enabled ? 1.0f : 0.0f, static_cast<float>(call.texture.function),
                            static_cast<float>(call.alpha_test.enabled ? call.alpha_test.reference : 0u),
                            static_cast<float>(call.alpha_test.enabled ? call.alpha_test.function : 0u)};
@@ -6624,6 +6691,7 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     if (trace_fb && call.texture.enabled && !call.clear_mode) impl.trace_framebuffer_texture(call);
 
     VkDescriptorSet texture_descriptor = impl.white_texture.descriptor;
+    bool texture_cutout = false;
     if (call.texture.enabled && !call.clear_mode) {
         const Impl::FramebufferTexture &source = framebuffer_source;
         const VkDescriptorSet copy =
@@ -6644,7 +6712,31 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
                                  (uv[3] * height + static_cast<float>(source.y)) / static_cast<float>(kPspHeight)};
         } else {
             texture_descriptor = impl.texture_descriptor(memory, call);
+            texture_cutout = impl.last_texture_cutout;
         }
+    }
+    // The scenery's foliage: unlit, alpha tested, with a texture cut out by
+    // its alpha (leaves, grass tufts, banners). It sways in the wind and
+    // lets the sun through.
+    // Small draws only: the far hills painted on cut-out panoramas and large
+    // carved rocks are cut out too.
+    const bool foliage = impl.effects_frame && texture_cutout && !call.through && !call.clear_mode && !raw &&
+                         !call.lighting_enabled && call.alpha_test.enabled &&
+                         (call.alpha_test.function == 6u || call.alpha_test.function == 7u) &&
+                         !interpolation::is_orthographic(call.projection) && world_sphere(call).radius < 3500.0f;
+    impl.current_draw_foliage = foliage;
+    if (impl.dump_frame && call.texture.enabled && !call.through)
+        std::printf("[dump] texture 0x%08X %ux%u cutout %d (clear %.2f flips %.3f) alpha test %d func %u ref %u lit %d "
+                    "r %.0f%s\n",
+                    call.texture.address, call.texture.width, call.texture.height, texture_cutout ? 1 : 0,
+                    static_cast<double>(impl.last_texture_share), static_cast<double>(impl.last_texture_flips),
+                    call.alpha_test.enabled ? 1 : 0, call.alpha_test.function, call.alpha_test.reference,
+                    call.lighting_enabled ? 1 : 0, static_cast<double>(world_sphere(call).radius),
+                    foliage ? " foliage" : "");
+    if (foliage && impl.effect_options.wind > 0.0f) {
+        push.viewport[0] = impl.wind_time;
+        push.viewport[1] = impl.effect_options.wind;
+        push.viewport[3] += kPushWind;
     }
 
     // The interface begins: the scene under it gets the lighting effects
@@ -6830,7 +6922,8 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
             if (!raw)
                 impl.note_shadow_caster(call, texture_descriptor, push.uv_transform, VK_NULL_HANDLE, vertex_start, 0u,
                                         draw_count);
-            impl.note_water(call, water, push, vk_viewport, vk_scissor, VK_NULL_HANDLE, vertex_start, 0u, draw_count);
+            impl.note_water(call, water, foliage, push, texture_descriptor, vk_viewport, vk_scissor, VK_NULL_HANDLE,
+                            vertex_start, 0u, draw_count);
             impl.record_draw_for_replay(call, lit, skinned_first, state, vertex_start, VK_NULL_HANDLE, 0u,
                                         draw_count, drawn_vertices, false);
         } else {
@@ -6870,8 +6963,8 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
             if (!raw)
                 impl.note_shadow_caster(call, texture_descriptor, push.uv_transform, impl.index_buffer,
                                         group.vertex_base, impl.index_offset, draw_count);
-            impl.note_water(call, water, push, vk_viewport, vk_scissor, impl.index_buffer, group.vertex_base,
-                            impl.index_offset, draw_count);
+            impl.note_water(call, water, foliage, push, texture_descriptor, vk_viewport, vk_scissor,
+                            impl.index_buffer, group.vertex_base, impl.index_offset, draw_count);
             impl.index_offset += impl.direct_indices.size() * sizeof(std::uint16_t);
             group.vertex_end = draw_end;
             group.index_count += draw_count;
@@ -6914,8 +7007,8 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     if (!raw)
         impl.note_shadow_caster(call, texture_descriptor, push.uv_transform, direct ? impl.vertex_buffer : VK_NULL_HANDLE,
                                 vertex_start, index_start, draw_count);
-    impl.note_water(call, water, push, vk_viewport, vk_scissor, direct ? impl.vertex_buffer : VK_NULL_HANDLE,
-                    vertex_start, index_start, draw_count);
+    impl.note_water(call, water, foliage, push, texture_descriptor, vk_viewport, vk_scissor,
+                    direct ? impl.vertex_buffer : VK_NULL_HANDLE, vertex_start, index_start, draw_count);
     if (impl.interpolating) {
         const Impl::DrawState state{pipeline, texture_descriptor, lighting_offsets, vk_viewport, vk_scissor,
                                     blend_constants, push};
@@ -7165,6 +7258,7 @@ void VulkanRenderer::Impl::record_draw_for_replay(const DrawCall &call, bool lit
         // then drawn with its own vertices.
         if (last.skinned != kNone && skinned != last.skinned + last.vertex_count) last.skinned = kNone;
         last.water = last.water || current_draw_water;
+        last.foliage = last.foliage || current_draw_foliage;
         last.count += count;
         last.vertex_count += vertex_count;
     } else {
@@ -7187,6 +7281,7 @@ void VulkanRenderer::Impl::record_draw_for_replay(const DrawCall &call, bool lit
         added.skinned = skinned;
         added.raw = raw;
         added.water = current_draw_water;
+        added.foliage = current_draw_foliage;
         if (raw && ((call.vertex_type >> 9u) & 3u) != 0u) {
             // A skinned raw group is blended through its bones.
             if (frame.raws.empty() || frame.raw_offset != raw_offset) {
@@ -7722,9 +7817,9 @@ void VulkanRenderer::Impl::replay(VkCommandBuffer commands, std::uint32_t slot, 
                                0u, sizeof(PushConstants), &state.push);
         set = state;
         known = true;
-        if (drawn.water && replay_effects)
-            replay_water.push_back({state.push.transform, state.viewport, state.scissor, drawn.index_buffer,
-                                    vertex_base, drawn.index_base, drawn.count});
+        if ((drawn.water || drawn.foliage) && replay_effects)
+            replay_water.push_back({state.push, state.texture, state.viewport, state.scissor, drawn.index_buffer,
+                                    vertex_base, drawn.index_base, drawn.count, drawn.foliage && !drawn.water});
         vkCmdBindVertexBuffers(commands, 0u, 1u, &vertex_buffer, &vertex_base);
         if (drawn.index_buffer != VK_NULL_HANDLE) {
             vkCmdBindIndexBuffer(commands, drawn.index_buffer, drawn.index_base, VK_INDEX_TYPE_UINT16);

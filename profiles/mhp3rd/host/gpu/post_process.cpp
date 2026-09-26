@@ -504,10 +504,11 @@ bool Effects::make_shadow_pipeline(VkPipelineLayout layout, std::uint32_t stride
 }
 
 bool Effects::make_water_pipeline(VkPipelineLayout layout, VkFormat depth_format, std::uint32_t stride,
-                                  std::uint32_t position_offset, std::uint32_t color_offset, std::string &error) {
+                                  std::uint32_t position_offset, std::uint32_t color_offset,
+                                  std::uint32_t texcoord_offset, std::string &error) {
     // The mask, cleared, and the target's depth, tested and kept as it is.
     std::array<VkAttachmentDescription, 2> attachments{};
-    attachments[0].format = VK_FORMAT_R8_UNORM;
+    attachments[0].format = VK_FORMAT_R8G8_UNORM;
     attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
     attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -637,8 +638,34 @@ bool Effects::make_water_pipeline(VkPipelineLayout layout, VkFormat depth_format
     info.pDynamicState = &dynamic;
     info.layout = layout;
     info.renderPass = water_pass_;
-    const bool made = check(vkCreateGraphicsPipelines(device_, cache_, 1u, &info, nullptr, &water_pipeline_),
-                            "vkCreateGraphicsPipelines (water)", error);
+    bool made = check(vkCreateGraphicsPipelines(device_, cache_, 1u, &info, nullptr, &water_pipeline_),
+                      "vkCreateGraphicsPipelines (water)", error);
+    for (VkShaderModule module : modules) vkDestroyShaderModule(device_, module, nullptr);
+    if (!made) return false;
+
+    // The foliage channel: cut out by the texture's alpha, into green.
+    const std::array<std::pair<const std::uint32_t *, std::size_t>, 2> foliage_code{
+        std::pair{kFoliageVertexShader, sizeof(kFoliageVertexShader)},
+        std::pair{kFoliageFragmentShader, sizeof(kFoliageFragmentShader)}};
+    modules = {};
+    for (std::size_t i = 0; i < modules.size(); ++i) {
+        VkShaderModuleCreateInfo module_info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+        module_info.codeSize = foliage_code[i].second;
+        module_info.pCode = foliage_code[i].first;
+        if (!check(vkCreateShaderModule(device_, &module_info, nullptr, &modules[i]),
+                   "vkCreateShaderModule (foliage)", error)) {
+            for (VkShaderModule module : modules) vkDestroyShaderModule(device_, module, nullptr);
+            return false;
+        }
+        stages[i].module = modules[i];
+    }
+    const std::array<VkVertexInputAttributeDescription, 2> foliage_attributes{
+        VkVertexInputAttributeDescription{0u, 0u, VK_FORMAT_R32G32B32A32_SFLOAT, position_offset},
+        VkVertexInputAttributeDescription{1u, 0u, VK_FORMAT_R32G32_SFLOAT, texcoord_offset}};
+    vertex_input.pVertexAttributeDescriptions = foliage_attributes.data();
+    blend.colorWriteMask = VK_COLOR_COMPONENT_G_BIT;
+    made = check(vkCreateGraphicsPipelines(device_, cache_, 1u, &info, nullptr, &foliage_pipeline_),
+                 "vkCreateGraphicsPipelines (foliage)", error);
     for (VkShaderModule module : modules) vkDestroyShaderModule(device_, module, nullptr);
     return made;
 }
@@ -797,7 +824,8 @@ void Effects::write_sun(const Camera &camera, const Options &options) {
     block.water[0] = options.water;
     block.water[1] = options.ripples;
     block.water[2] = std::fmod(std::chrono::duration<float>(std::chrono::steady_clock::now() - started).count(), 3600.0f);
-    block.water[3] = water_this_frame_ && options.water > 0.0f ? 1.0f : 0.0f;
+    // 1 when the mask (water and foliage) was drawn for this scene.
+    block.water[3] = water_this_frame_ ? 1.0f : 0.0f;
     block.clouds[0] = options.clouds;
     block.clouds[1] = std::clamp(options.cloud_cover, 0.0f, 1.0f);
     block.clouds[2] = std::max(options.cloud_size, 100.0f);
@@ -805,6 +833,7 @@ void Effects::write_sun(const Camera &camera, const Options &options) {
     block.bounce[0] = options.bounce;
     block.bounce[1] = options.beams;
     block.bounce[2] = options.sun_disc;
+    block.bounce[3] = options.translucency;
     const std::uint32_t slot = sun_next_++ % kSunSlots;
     sun_offset_ = static_cast<std::uint32_t>(slot * sun_stride_);
     std::memcpy(static_cast<std::uint8_t *>(sun_mapped_) + sun_offset_, &block, sizeof(block));
@@ -922,7 +951,7 @@ bool Effects::resize(VkExtent2D extent, VkFormat depth_format, std::string &erro
                     pass_average_, error) ||
         !make_image(averages_[1], {1u, 1u}, VK_FORMAT_R16G16B16A16_SFLOAT, kDrawn, VK_IMAGE_ASPECT_COLOR_BIT,
                     pass_average_, error) ||
-        !make_image(water_mask_, extent, VK_FORMAT_R8_UNORM, kDrawn, VK_IMAGE_ASPECT_COLOR_BIT, VK_NULL_HANDLE,
+        !make_image(water_mask_, extent, VK_FORMAT_R8G8_UNORM, kDrawn, VK_IMAGE_ASPECT_COLOR_BIT, VK_NULL_HANDLE,
                     error) ||
         !make_image(reflection_, half, VK_FORMAT_R16G16B16A16_SFLOAT, kDrawn, VK_IMAGE_ASPECT_COLOR_BIT,
                     pass_average_, error) ||
@@ -1040,7 +1069,7 @@ void Effects::destroy() {
     destroy_sized();
     for (VkPipeline pipeline :
          {depth_pipeline_, ao_pipeline_, blur_pipeline_, down_pipeline_, up_pipeline_, composite_pipeline_,
-          rays_pipeline_, average_pipeline_, reflect_pipeline_, water_pipeline_, bounce_pipeline_})
+          rays_pipeline_, average_pipeline_, reflect_pipeline_, water_pipeline_, bounce_pipeline_, foliage_pipeline_})
         vkDestroyPipeline(device_, pipeline, nullptr);
     for (VkRenderPass pass : {pass_r32f_, pass_rg16f_, pass_rgba16f_, pass_target_, pass_average_})
         vkDestroyRenderPass(device_, pass, nullptr);
@@ -1068,6 +1097,7 @@ void Effects::destroy() {
     timer_next_ = 0u;
     depth_pipeline_ = ao_pipeline_ = blur_pipeline_ = down_pipeline_ = up_pipeline_ = composite_pipeline_ = {};
     rays_pipeline_ = average_pipeline_ = reflect_pipeline_ = water_pipeline_ = bounce_pipeline_ = VK_NULL_HANDLE;
+    foliage_pipeline_ = VK_NULL_HANDLE;
     vkDestroyRenderPass(device_, water_pass_, nullptr);
     water_pass_ = VK_NULL_HANDLE;
     pass_r32f_ = pass_rg16f_ = pass_rgba16f_ = pass_target_ = pass_average_ = {};
@@ -1411,6 +1441,7 @@ Options options_from_text(Options options, const std::string &text) {
         else if (name == "bounce") options.bounce = value;
         else if (name == "beams") options.beams = value;
         else if (name == "sundisc") options.sun_disc = value;
+        else if (name == "leaves") options.translucency = value;
         else if (name == "wind") options.wind = value;
         else if (name == "reach") options.rays_reach = value;
         else if (name == "debug") options.debug = static_cast<int>(value);

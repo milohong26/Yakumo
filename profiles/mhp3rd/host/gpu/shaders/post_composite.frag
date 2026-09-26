@@ -20,7 +20,8 @@
 //        blends away (0: off)
 //   p.light: x the GE fog's end, y its scale, z 1 when the scene is fogged,
 //            w what MHP3RD_EFFECTS_DEBUG shows instead (1 occlusion,
-//            2 sunlight and shadows, 3 distance, 4 bloom)
+//            2 sunlight and shadows, 3 distance, 4 bloom, 5 water red and
+//            foliage green)
 layout(set = 0, binding = 0) uniform sampler2D scene;
 layout(set = 0, binding = 1) uniform sampler2D depth_buffer;
 layout(set = 0, binding = 2) uniform sampler2D distances;  // half resolution
@@ -28,7 +29,7 @@ layout(set = 0, binding = 3) uniform sampler2D visibility; // half resolution: a
 layout(set = 0, binding = 4) uniform sampler2D bloom;      // half resolution, expanded linear light
 layout(set = 0, binding = 7) uniform sampler2D rays;       // quarter resolution: light shafts
 layout(set = 0, binding = 8) uniform sampler2D average;    // 1x1: rgb the sky's colour, a how much the sun reaches
-layout(set = 0, binding = 10) uniform sampler2D water_mask; // full resolution: how much of the pixel is water
+layout(set = 0, binding = 10) uniform sampler2D water_mask; // full resolution: r how much of the pixel is water, g foliage
 layout(set = 0, binding = 11) uniform sampler2D reflection; // half resolution: rgb the reflection, a how sure
 layout(set = 0, binding = 12) uniform sampler2D bounce;     // quarter resolution: sunlight bounced off what it lights
 layout(location = 0) in vec2 uv;
@@ -210,6 +211,7 @@ void main() {
         vec3 shown = debug == 1 ? vec3(vis.x)
                    : debug == 2 ? vec3(vis.y)
                    : debug == 3 ? vec3(sky ? 0.0 : fract(log2(dist) * 0.5))
+                   : debug == 5 ? vec3(texelFetch(water_mask, ivec2(gl_FragCoord.xy), 0).rg * sun.water.w, 0.0)
                                 : to_srgb(texture(bloom, uv).rgb * 0.25);
         out_color = vec4(shown, base.a);
         return;
@@ -286,6 +288,15 @@ void main() {
         vec3 shaded = tint * mix(1.0 - (1.0 - sun.shade.w) * 0.35, sun.shade.w, adapted);
         vec3 albedo = color;
         color *= mix(vec3(1.0), mix(shaded, lit, vis.y), clear * near);
+        // Leaves let the sun through: looking towards it, foliage glows with
+        // the light behind it, tinted by its own colour.
+        float foliage = sun.water.w > 0.5 ? texelFetch(water_mask, ivec2(gl_FragCoord.xy), 0).g : 0.0;
+        if (foliage > 0.0 && sun.bounce.w > 0.0 && sun.water.w > 0.5) {
+            vec3 ray = normalize(view_position(gl_FragCoord.xy, dist));
+            float behind = max(dot(ray, sun.direction.xyz), 0.0);
+            float through = behind * behind * behind * (0.35 + 0.65 * vis.y);
+            color += albedo * sun.color.rgb * (through * sun.color.w * sun.bounce.w * foliage * clear * near * 3.0);
+        }
         // Sunlight bounced off the lit surfaces around, most where the sun
         // itself does not reach.
         vec3 bounced = texture(bounce, uv).rgb * sun.color.rgb * sun.color.w;

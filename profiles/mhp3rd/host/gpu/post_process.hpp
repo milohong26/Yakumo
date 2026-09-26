@@ -96,6 +96,7 @@ struct Options {
     float rays{0.22f};
     float beams{0.3f};  // beams from the bright sky through what stands against it, on the screen
     float sun_disc{1.0f};  // the sun's disc and glare where the sky is bright around it
+    float translucency{2.0f};  // leaves glowing with the sun behind them
     // Water: reflections of the scene and sky on the game's water surfaces,
     // with moving ripples and the sun's glints. 0 turns them off.
     float water{1.0f};
@@ -172,8 +173,12 @@ public:
     // end_water, tested against the target's depth (in its attachment
     // layout); position as four floats and colour as four bytes.
     bool make_water_pipeline(VkPipelineLayout layout, VkFormat depth_format, std::uint32_t stride,
-                             std::uint32_t position_offset, std::uint32_t color_offset, std::string &error);
+                             std::uint32_t position_offset, std::uint32_t color_offset, std::uint32_t texcoord_offset,
+                             std::string &error);
     [[nodiscard]] VkPipeline water_pipeline() const noexcept { return water_pipeline_; }
+    // The foliage channel's pipeline, drawn in the same pass with the GE's
+    // vertex layout (position, texture coordinates) and set 0 the texture.
+    [[nodiscard]] VkPipeline foliage_pipeline() const noexcept { return foliage_pipeline_; }
     bool begin_water(VkCommandBuffer commands, VkImageView color_view, VkImageView depth_view);
     void end_water(VkCommandBuffer commands);
 
@@ -270,6 +275,7 @@ private:
     // The water mask's pass (on each target's depth) and pipeline.
     VkRenderPass water_pass_{};
     VkPipeline water_pipeline_{};
+    VkPipeline foliage_pipeline_{};
     std::map<VkImageView, VkFramebuffer> water_framebuffers_;  // by the target's colour view
     bool water_this_frame_{};
     std::map<VkImageView, VkFramebuffer> target_framebuffers_;
