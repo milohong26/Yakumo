@@ -14,6 +14,7 @@ layout(set = 0, binding = 6) uniform Sun {
     vec4 clouds;          // x: how much their shadows darken, y: cover (0 to 1), z: size in world units,
                           // w: how much bright light lights the surfaces around it
     vec4 fog;             // x: how much the sun tints the game's fog
+    vec4 relief;          // x: how much the sun lights the textures' detail as relief
     vec4 bounce;          // x: how much sunlight bounces off what it lights, y: screen-space beams' strength,
                           // z: the sun's disc, w: leaves' translucency
 } sun;

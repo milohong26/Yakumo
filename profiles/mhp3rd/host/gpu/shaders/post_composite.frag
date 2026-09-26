@@ -61,6 +61,9 @@ bool antialiased(vec2 at, float subpixel, float m, float n, float s, float w, fl
 // The pixel's own colour and its four neighbours, once for both the edge
 // test and the sharpening; the corners and the walk along an edge only where
 // there is one.
+// The luminance slope across the pixel (x east, y south), for the relief.
+vec2 luma_slope;
+
 vec3 filtered(vec2 at, float subpixel, float sharpen) {
     ivec2 texel = ivec2(gl_FragCoord.xy);
     ivec2 limit = textureSize(scene, 0) - 1;
@@ -69,6 +72,7 @@ vec3 filtered(vec2 at, float subpixel, float sharpen) {
     vec3 c_s = texelFetch(scene, clamp(texel + ivec2(0, 1), ivec2(0), limit), 0).rgb;
     vec3 c_w = texelFetch(scene, clamp(texel + ivec2(-1, 0), ivec2(0), limit), 0).rgb;
     vec3 c_e = texelFetch(scene, clamp(texel + ivec2(1, 0), ivec2(0), limit), 0).rgb;
+    luma_slope = vec2(luma(c_e) - luma(c_w), luma(c_s) - luma(c_n)) * 0.5;
     vec3 color;
     if (subpixel > 0.0 && antialiased(at, subpixel, luma(c_m), luma(c_n), luma(c_s), luma(c_w), luma(c_e), color))
         return color;
@@ -313,6 +317,16 @@ void main() {
         vec3 shaded = tint * mix(1.0 - (1.0 - sun.shade.w) * 0.35, sun.shade.w, adapted);
         vec3 albedo = color;
         color *= mix(vec3(1.0), mix(shaded, lit, vis.y), clear * near);
+        // Relief: the texture's detail read as height (brighter is higher)
+        // and lit by the sun, so stone and earth look rough in sunlight.
+        // Edges between objects are left alone.
+        if (sun.relief.x > 0.0) {
+            vec2 towards = sun.direction.xy * vec2(1.0, -1.0);
+            float slope_length = length(luma_slope);
+            // Rising towards the sun, a slope faces away from it.
+            float detail = slope_length < 0.25 ? -dot(luma_slope, towards) / max(length(towards), 0.2) : 0.0;
+            color *= 1.0 + clamp(detail * sun.relief.x * 4.0, -0.35, 0.35) * vis.y * clear * near;
+        }
         // Leaves let the sun through: looking towards it, foliage glows with
         // the light behind it, tinted by its own colour.
         float foliage = sun.water.w > 0.5 ? texelFetch(water_mask, ivec2(gl_FragCoord.xy), 0).g : 0.0;
