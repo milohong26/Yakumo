@@ -799,6 +799,7 @@ void Effects::write_sun(const Camera &camera, const Options &options) {
     block.clouds[0] = options.clouds;
     block.clouds[1] = std::clamp(options.cloud_cover, 0.0f, 1.0f);
     block.clouds[2] = std::max(options.cloud_size, 100.0f);
+    block.clouds[3] = options.light_bleed;
     const std::uint32_t slot = sun_next_++ % kSunSlots;
     sun_offset_ = static_cast<std::uint32_t>(slot * sun_stride_);
     std::memcpy(static_cast<std::uint8_t *>(sun_mapped_) + sun_offset_, &block, sizeof(block));
@@ -1376,6 +1377,7 @@ Options options_from_text(Options options, const std::string &text) {
         else if (name == "clouds") options.clouds = value;
         else if (name == "cover") options.cloud_cover = value;
         else if (name == "cloudsize") options.cloud_size = value;
+        else if (name == "bleed") options.light_bleed = value;
         else if (name == "reach") options.rays_reach = value;
         else if (name == "debug") options.debug = static_cast<int>(value);
     }

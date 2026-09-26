@@ -11,7 +11,8 @@ layout(set = 0, binding = 6) uniform Sun {
     vec4 rays;            // x: light shaft strength, y: their reach, z: forward scattering, w: penumbra per unit
     mat4 view_to_world;   // for the water's ripples, which move in the world
     vec4 water;           // x: reflection strength, y: ripples, z: time in seconds, w: 1 when water was drawn
-    vec4 clouds;          // x: how much their shadows darken, y: cover (0 to 1), z: size in world units
+    vec4 clouds;          // x: how much their shadows darken, y: cover (0 to 1), z: size in world units,
+                          // w: how much bright light lights the surfaces around it
 } sun;
 
 float cloud_hash(vec2 p) {

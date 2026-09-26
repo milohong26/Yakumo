@@ -104,6 +104,9 @@ struct Options {
     float clouds{0.55f};
     float cloud_cover{0.45f};
     float cloud_size{1800.0f};
+    // Bright light (fires, lanterns, the sun on white stone) lighting the
+    // surfaces around it through the bloom's spread light. 0 turns it off.
+    float light_bleed{0.5f};
     float rays_g{0.7f};  // how much the air scatters forward, towards the sun (Henyey-Greenstein g)
     float rays_reach{2600.0f};  // how far along a view ray the air is seen, in the game's units
     int debug{};  // 1 occlusion, 2 contact shadows, 3 distance, 4 bloom

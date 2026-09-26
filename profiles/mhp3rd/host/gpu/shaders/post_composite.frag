@@ -277,7 +277,12 @@ void main() {
         vec3 shaded = tint * mix(1.0 - (1.0 - sun.shade.w) * 0.35, sun.shade.w, adapted);
         color *= mix(vec3(1.0), mix(shaded, lit, vis.y), clear * near);
     }
-    color += texture(bloom, uv).rgb * p.a.z;
+    vec3 glow = texture(bloom, uv).rgb;
+    // Bright light lights what is around it, too: the bloom's spread light
+    // falls on each surface by its own colour, so a fire warms the ground
+    // and walls near it as well as glowing.
+    if (!sky) color += color * glow * (sun.clouds.w * 4.0);
+    color += glow * p.a.z;
     if (sun.rays.x > 0.0 && sun.direction.w > 0.5) {
         // Filtered up from a quarter of the resolution, which smooths the
         // march's dither.

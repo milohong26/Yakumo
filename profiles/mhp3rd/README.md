@@ -399,7 +399,7 @@ Two settings in the Video section relight the game like a present-day remaster, 
     - A half-resolution pass mirrors each water pixel's view about a surface rippled by moving waves and marches it through the scene; what it finds (or the sky's colour) is blended by the Fresnel term.
     - The sun glints on the water where its shadow map lets it reach.
   - **Ambient occlusion**: ground-truth ambient occlusion (GTAO) from the depth buffer, at half resolution, with a depth-aware denoise and a joint bilateral upsample, fading with the game's fog.
-  - **Bloom** of the brightest light, expanded through an invertible shoulder so pixels no light was added to come out unchanged.
+  - **Bloom** of the brightest light, expanded through an invertible shoulder so pixels no light was added to come out unchanged. Its spread light also falls on the surfaces around it by their own colour, so fires and lanterns light what is near them.
   - **Edges**: edge anti-aliasing (the scheme of FXAA's quality preset), and contrast-adaptive sharpening elsewhere.
   - **Grade**: contrast on luminance, saturation and vibrance, a warm/cool split, a vignette, and dither.
 
@@ -412,7 +412,7 @@ The effects' images, passes and pipelines are made at start and when the resolut
 | Water | `water` (1.0; 0 turns reflections off), `ripples` (1.0) |
 | Clouds | `clouds` (0.55, how much their shadows darken; 0 turns them off), `cover` (0.45), `cloudsize` (1800, in the game's units) |
 | Sun and shadows | `sun` (1.0; 0 turns sunlight and shadows off), `shade` (0.42, how bright shadowed surfaces stay), `warmth` (1.0), `range` (2200, half the width of the ground the shadow map covers, in the game's units), `soft` (0.025, penumbra per unit of distance; 0 keeps shadows evenly sharp), `gamesun` (1; 0 uses `elevation` and `azimuth` in degrees instead of the game's sun), `rays` (0.1), `reach` (2600), `g` (0.7, how much the air scatters towards the sun) |
-| Image | `ao` (1.0), `radius` (42, in the game's units), `bloom` (0.22), `threshold`, `knee`, `cap`, `sharpen` (0.2), `aa` (0.5; 0 turns anti-aliasing off), `exposure`, `contrast` (1.16), `saturation` (1.05), `vibrance` (0.4), `vignette` (0.14), `split` (0.9), `shoulder` |
+| Image | `ao` (1.0), `radius` (42, in the game's units), `bloom` (0.22), `bleed` (0.5, how much bright light lights the surfaces around it), `threshold`, `knee`, `cap`, `sharpen` (0.2), `aa` (0.5; 0 turns anti-aliasing off), `exposure`, `contrast` (1.16), `saturation` (1.05), `vibrance` (0.4), `vignette` (0.14), `split` (0.9), `shoulder` |
 | Models | `highlight` (1.2), `gloss` (24), `rim` (0.7), `wrap` (0.2), `ground` (0.75), `knee` (0.6; 0 clips as the PSP does) |
 
 `shadows` turns on experimental screen-space contact shadows towards the sun. `MHP3RD_EFFECTS_LIVE` names a file with the same pairs (commas, spaces or lines between them), read again whenever it changes, for tuning while playing; `debug=N` in it shows a buffer. `MHP3RD_EFFECTS_DEBUG` shows one buffer instead of the picture: `1` occlusion, `2` sunlight and shadows, `3` distance, `4` bloom. `MHP3RD_TRACE_EFFECTS=1` times each stage on the GPU and says why a frame had no effects (see [Diagnostics](#diagnostics)).
