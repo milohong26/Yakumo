@@ -3651,12 +3651,17 @@ WorldSphere world_sphere(const DrawCall &call) {
     return sphere;
 }
 
-// The game's water, as it draws it: large, flat surfaces facing up, blended
-// over what is under them by their vertex alpha (not all opaque), writing
-// depth. Traced with MHP3RD_EFFECTS_DUMP; hiding the texture of such draws
-// (MHP3RD_HIDE_TEXTURES) takes the water away.
+// The game's water, as it draws it: large, flat surfaces facing up, writing
+// depth, with vertex alpha that is not all opaque, either blended over what
+// is under them and lit (the hot spring; the scenery's blended layers of
+// grass and dirt are drawn the same way but unlit, with the lighting baked
+// into their colours) or added to it (the village's streams, and the hot
+// spring's shimmer). Traced with MHP3RD_EFFECTS_DUMP; hiding the texture of
+// such draws (MHP3RD_HIDE_TEXTURES) takes the water away.
 bool looks_like_water(const DrawCall &call) {
-    if (call.through || call.clear_mode || !call.blend.enabled || call.blend.destination_factor != 3u ||
+    const bool blended_lit = call.blend.destination_factor == 3u && call.lighting_enabled;
+    const bool added = call.blend.destination_factor == 10u;  // a fixed factor: one, for these
+    if (call.through || call.clear_mode || !call.blend.enabled || !(blended_lit || added) ||
         !call.depth.write_enabled || !call.depth.test_enabled || !call.has_vertex_color || call.vertices.size() < 3u)
         return false;
     std::uint32_t alpha_hi = 0u;

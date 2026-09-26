@@ -319,9 +319,9 @@ void Menu::video() {
         settings::save();
     }
     if (choice_row("Image effects", s.effects ? "On" : "Off",
-                   options_for("video.effects", "The sun's light and shadows, light shafts, ambient occlusion, "
-                                                "bloom, edge smoothing and a colour grade on the 3D scene, under the "
-                                                "interface."))) {
+                   options_for("video.effects", "The sun's light and shadows, light shafts, water reflections, "
+                                                "ambient occlusion, bloom, edge smoothing and a colour grade on the "
+                                                "3D scene, under the interface."))) {
         s.effects = !s.effects;
         settings::save();
     }
