@@ -99,6 +99,7 @@ struct Options {
     float translucency{2.0f};  // leaves glowing with the sun behind them
     float fog_tint{0.7f};      // the game's fog warmer towards the sun, cooler away
     float relief{0.8f};        // the textures' detail lit by the sun as relief
+    float sky_gradient{0.7f};  // the sky deeper overhead and paler towards the horizon
     // Water: reflections of the scene and sky on the game's water surfaces,
     // with moving ripples and the sun's glints. 0 turns them off.
     float water{1.0f};

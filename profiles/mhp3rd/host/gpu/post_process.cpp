@@ -836,6 +836,7 @@ void Effects::write_sun(const Camera &camera, const Options &options) {
     block.clouds[3] = options.light_bleed;
     block.fog[0] = options.fog_tint;
     block.relief[0] = options.relief;
+    block.relief[1] = options.sky_gradient;
     block.bounce[0] = options.bounce;
     block.bounce[1] = options.beams;
     block.bounce[2] = options.sun_disc;
@@ -1450,6 +1451,7 @@ Options options_from_text(Options options, const std::string &text) {
         else if (name == "leaves") options.translucency = value;
         else if (name == "fogtint") options.fog_tint = value;
         else if (name == "relief") options.relief = value;
+        else if (name == "skygrade") options.sky_gradient = value;
         else if (name == "wind") options.wind = value;
         else if (name == "reach") options.rays_reach = value;
         else if (name == "debug") options.debug = static_cast<int>(value);

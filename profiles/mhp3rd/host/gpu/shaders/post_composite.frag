@@ -258,6 +258,17 @@ void main() {
         float far = sky ? 1.0 : smoothstep(sun.params.w * 1.2, sun.params.w * 3.0, dist);
         float glow = pow(towards, 6.0) * 0.22 + pow(towards, 48.0) * 0.45;
         color += sun.color.rgb * (glow * far * sun.color.w * sun.rays.x * 5.0);
+        if (sky && sun.relief.y > 0.0) {
+            // The sky deepens overhead and pales towards the horizon, as the
+            // air a ray crosses thickens: a gradient over the game's painted
+            // dome, more saturated above.
+            float elevation = clamp((mat3(sun.view_to_world) * ray).y, -0.2, 1.0);
+            float overhead = smoothstep(0.05, 0.8, elevation);
+            float luma_sky = luminance(color);
+            vec3 deeper = mix(vec3(luma_sky), color, 1.25) * 0.82;
+            vec3 paler = mix(color, vec3(luma_sky * 1.08), 0.25);
+            color = mix(color, mix(paler, deeper, overhead), sun.relief.y);
+        }
         if (sky && sun.bounce.z > 0.0) {
             // The sun's disc and its glare, where the sky around it is
             // bright: not through the game's clouds or a dark sky.
