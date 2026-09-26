@@ -1213,7 +1213,9 @@ void Effects::record(VkCommandBuffer commands, VkImage color, VkImageView color_
         run(commands, pass_rg16f_, visibility_a_.framebuffer, visibility_a_.extent, ao_pipeline_, ao_set_, ao);
         stamp(commands, slot, 3u);
         run(commands, pass_rg16f_, visibility_b_.framebuffer, visibility_b_.extent, blur_pipeline_, blur_set_, params);
-        if (options.sun > 0.0f)
+        // The frames interpolated between the game's keep the game frame's
+        // average: it changes slowly.
+        if (options.sun > 0.0f && bloom)
             run(commands, pass_average_, average_.framebuffer, average_.extent, average_pipeline_, average_set_, params);
     }
     if (water_this_frame_ && options.water > 0.0f)
@@ -1221,7 +1223,9 @@ void Effects::record(VkCommandBuffer commands, VkImage color, VkImageView color_
             params);
     water_this_frame_ = false;
     if (!occlusion) stamp(commands, slot, 3u);
-    if (options.rays > 0.0f && options.sun > 0.0f && shadow_drawn_) {
+    // Light shafts are soft and slow: the frames interpolated between the
+    // game's keep the game frame's.
+    if (options.rays > 0.0f && options.sun > 0.0f && shadow_drawn_ && bloom) {
         Params rays = params;
         rays.a[0] = 12.0f;
         rays.a[1] = static_cast<float>(sun_next_ % 64u) * 7.0f;

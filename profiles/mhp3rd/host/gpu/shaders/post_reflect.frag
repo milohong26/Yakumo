@@ -38,15 +38,15 @@ void main() {
     float noise = ign(gl_FragCoord.xy + sun.water.z * 60.0);
     // Steps growing with distance, so near reflections are exact and far
     // ones still reach the hills.
-    float step_length = max(dist * 0.02, 4.0);
+    float step_length = max(dist * 0.025, 5.0);
     vec3 at = origin + r * step_length * noise;
     vec3 previous = origin;
     float hit = 0.0;
     vec2 hit_uv = vec2(0.0);
-    for (int i = 0; i < 28; ++i) {
+    for (int i = 0; i < 20; ++i) {
         previous = at;
         at += r * step_length;
-        step_length *= 1.18;
+        step_length *= 1.22;
         vec2 screen = target_pixel(at) / p.viewport.zw;
         if (any(lessThan(screen, vec2(0.0))) || any(greaterThan(screen, vec2(1.0))) || at.z > -1.0) break;
         float scene_dist = textureLod(distances, screen, 0.0).r;
@@ -63,7 +63,7 @@ void main() {
             hit_uv = target_pixel(b) / p.viewport.zw;
             // Fade at the screen's edges and for rays that went far.
             vec2 edge = min(hit_uv, 1.0 - hit_uv);
-            hit = smoothstep(0.0, 0.08, min(edge.x, edge.y)) * (1.0 - float(i) / 28.0 * 0.5);
+            hit = smoothstep(0.0, 0.08, min(edge.x, edge.y)) * (1.0 - float(i) / 20.0 * 0.5);
             break;
         }
     }

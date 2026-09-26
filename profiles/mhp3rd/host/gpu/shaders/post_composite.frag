@@ -279,10 +279,9 @@ void main() {
     }
     color += texture(bloom, uv).rgb * p.a.z;
     if (sun.rays.x > 0.0 && sun.direction.w > 0.5) {
-        // Four bilinear taps around the pixel smooth the march's dither.
-        vec2 t = 0.75 / vec2(textureSize(rays, 0));
-        float shafts = 0.25 * (texture(rays, uv + vec2(-t.x, -t.y)).r + texture(rays, uv + vec2(t.x, -t.y)).r +
-                               texture(rays, uv + vec2(-t.x, t.y)).r + texture(rays, uv + vec2(t.x, t.y)).r);
+        // Filtered up from a quarter of the resolution, which smooths the
+        // march's dither.
+        float shafts = texture(rays, uv).r;
         color += sun.color.rgb * (shafts * sun.rays.x);
     }
     color = grade(max(color, vec3(0.0)));
