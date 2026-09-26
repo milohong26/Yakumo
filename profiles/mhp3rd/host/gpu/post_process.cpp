@@ -807,7 +807,9 @@ void Effects::write_sun(const Camera &camera, const Options &options) {
     block.shade[0] = 1.0f - 0.18f * w;
     block.shade[1] = 1.0f - 0.1f * w;
     block.shade[2] = 1.0f + 0.08f * w;
-    block.shade[3] = options.shade;
+    // A weak key light (dusk, night, an overcast area) casts weak shadows:
+    // the shade darkens by as much less.
+    block.shade[3] = 1.0f - (1.0f - options.shade) * std::min(strength, 1.0f);
     block.params[0] = 1.0f / static_cast<float>(kShadowSize);
     block.params[1] = shadow_texel_world_;
     block.params[2] = options.sun > 0.0f ? 1.0f : 0.0f;
