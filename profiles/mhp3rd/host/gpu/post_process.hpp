@@ -61,7 +61,7 @@ struct Options {
     float contrast{1.16f};
     float saturation{1.05f};
     float vibrance{0.4f};
-    float vignette{0.14f};
+    float vignette{0.06f};
     float split_toning{0.9f};
     float shoulder{0.8f};
     // Lit models shaded per pixel (video.lighting; ge.frag): the strength of
