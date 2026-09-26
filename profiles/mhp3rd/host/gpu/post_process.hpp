@@ -82,7 +82,7 @@ struct Options {
     // brightness. `shadow_range`: half the width of the ground the shadow
     // map covers around the camera, in the game's units.
     float sun{1.0f};
-    float shade{0.42f};
+    float shade{0.46f};
     float warmth{1.0f};  // how far sunlight leans towards gold and shade towards blue
     float sun_elevation{52.0f};  // used where the game's own sun is not known
     float sun_azimuth{35.0f};

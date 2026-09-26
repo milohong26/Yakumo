@@ -413,7 +413,7 @@ The effects' images, passes and pipelines are made at start and when the resolut
 | Water | `water` (1.0; 0 turns reflections off), `ripples` (1.0) |
 | Clouds | `clouds` (0.55, how much their shadows darken; 0 turns them off), `cover` (0.45), `cloudsize` (1800, in the game's units) |
 | Bounced light | `bounce` (0.6; 0 turns it off) |
-| Sun and shadows | `sun` (1.0; 0 turns sunlight and shadows off), `shade` (0.42, how bright shadowed surfaces stay), `warmth` (1.0), `range` (2200, half the width of the ground the shadow map covers, in the game's units), `soft` (0.025, penumbra per unit of distance; 0 keeps shadows evenly sharp), `gamesun` (1; 0 uses `elevation` and `azimuth` in degrees instead of the game's sun), `rays` (0.1), `reach` (2600), `g` (0.7, how much the air scatters towards the sun) |
+| Sun and shadows | `sun` (1.0; 0 turns sunlight and shadows off), `shade` (0.46, how bright shadowed surfaces stay), `warmth` (1.0), `range` (2200, half the width of the ground the shadow map covers, in the game's units), `soft` (0.025, penumbra per unit of distance; 0 keeps shadows evenly sharp), `gamesun` (1; 0 uses `elevation` and `azimuth` in degrees instead of the game's sun), `rays` (0.1), `reach` (2600), `g` (0.7, how much the air scatters towards the sun) |
 | Image | `ao` (1.0), `radius` (42, in the game's units), `bloom` (0.22), `bleed` (0.5, how much bright light lights the surfaces around it), `threshold`, `knee`, `cap`, `sharpen` (0.2), `aa` (0.5; 0 turns anti-aliasing off), `exposure`, `contrast` (1.16), `saturation` (1.05), `vibrance` (0.4), `vignette` (0.14), `split` (0.9), `shoulder` |
 | Models | `highlight` (1.2), `gloss` (24), `rim` (0.7), `wrap` (0.2), `ground` (0.75), `knee` (0.6; 0 clips as the PSP does) |
 
