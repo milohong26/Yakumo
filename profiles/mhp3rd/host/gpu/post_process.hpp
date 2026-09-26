@@ -24,12 +24,15 @@ namespace mhp3rd::gpu::post {
 struct Camera {
     bool valid{};
     std::array<float, 16> projection{};  // column major, as the GE's
+    std::array<float, 16> view{};        // world to view, column major
     float viewport_x{};                  // the Vulkan viewport, in target pixels
     float viewport_y{};
     float viewport_width{};
     float viewport_height{};  // negative: flipped, as the GE's
     float depth_min{};
     float depth_max{};
+    std::array<float, 3> sun{};    // world-space direction towards the game's sun
+    bool sun_known{};              // ...found among the lights of its lit draws
     std::array<float, 3> light{};  // view-space direction towards the key light
     float light_strength{};        // 0: no key light
     bool fog{};                    // the scene is drawn with the GE's fog
@@ -47,16 +50,16 @@ struct Options {
     float shadow_distance{1500.0f};
     // Bloom works on light above the shoulder's knee, expanded as if the
     // picture had not been clipped to white (up to bloom_cap).
-    float bloom{0.12f};
+    float bloom{0.25f};
     float bloom_threshold{1.0f};
     float bloom_knee{0.5f};
     float bloom_cap{3.0f};
     float sharpen{0.2f};
     float antialias{0.5f};   // edge anti-aliasing's sub-pixel blend; 0 turns it off
     float exposure{1.0f};
-    float contrast{1.06f};
-    float saturation{1.03f};
-    float vibrance{0.15f};
+    float contrast{1.12f};
+    float saturation{1.05f};
+    float vibrance{0.3f};
     float vignette{0.14f};
     float split_toning{0.6f};
     float shoulder{0.8f};
@@ -71,6 +74,23 @@ struct Options {
     float wrap{0.2f};
     float ground{0.75f};
     float knee{0.6f};
+    // Sunlight: a sun in the sky (degrees; elevation above the horizon,
+    // azimuth about the world's up axis) whose shadows are drawn from a
+    // shadow map of the scene's own geometry. Lit surfaces take `sun` more
+    // light of the sun's colour; shadowed ones fall to `shade` of their
+    // brightness. `shadow_range`: half the width of the ground the shadow
+    // map covers around the camera, in the game's units.
+    float sun{0.9f};
+    float shade{0.45f};
+    float warmth{1.0f};  // how far sunlight leans towards gold and shade towards blue
+    float sun_elevation{52.0f};  // used where the game's own sun is not known
+    float sun_azimuth{35.0f};
+    bool sun_from_game{true};    // the game's key light, fixed in the world, as the sun
+    float shadow_range{1400.0f};
+    // Light shafts through the air where the sun reaches it; 0 turns them off.
+    float rays{0.2f};
+    float rays_g{0.7f};  // how much the air scatters forward, towards the sun (Henyey-Greenstein g)
+    float rays_reach{2600.0f};  // how far along a view ray the air is seen, in the game's units
     int debug{};  // 1 occlusion, 2 contact shadows, 3 distance, 4 bloom
 };
 
@@ -108,6 +128,19 @@ public:
     // composite.
     [[nodiscard]] double take_gpu_ms(std::array<double, 6> *stages = nullptr);
 
+    // The sun's shadow map. The caller makes the pipeline that draws into it
+    // with its own pipeline layout (the GE's: push constants with the
+    // transform, set 0 the texture) and vertex layout (position as four
+    // floats, texture coordinates as two), then for a scene: begin_shadows,
+    // its draws with transform = world_to_clip * world, end_shadows, and
+    // record() uses the map. world_to_clip is column major.
+    bool make_shadow_pipeline(VkPipelineLayout layout, std::uint32_t stride, std::uint32_t position_offset,
+                              std::uint32_t texcoord_offset, std::string &error);
+    [[nodiscard]] VkPipeline shadow_pipeline() const noexcept { return shadow_pipeline_; }
+    bool begin_shadows(VkCommandBuffer commands, const Camera &camera, const Options &options,
+                       std::array<float, 16> &world_to_clip);
+    void end_shadows(VkCommandBuffer commands);
+
 private:
     struct Image {
         VkImage image{};
@@ -126,7 +159,10 @@ private:
     bool make_pass(VkFormat format, bool keep_target, VkRenderPass &pass, std::string &error);
     bool make_pipeline(const std::uint32_t *fragment, std::size_t bytes, VkRenderPass pass, VkPipeline &pipeline,
                        std::string &error);
-    VkDescriptorSet make_set(std::array<VkImageView, 5> views, std::array<bool, 5> linear);
+    // Views for bindings 0-4 and 7 (views[5]); null takes a stand-in.
+    VkDescriptorSet make_set(std::array<VkImageView, 6> views, std::array<bool, 6> linear);
+    void write_sun(const Camera &camera, const Options &options);
+    bool make_shadow_resources(std::string &error);
     void run(VkCommandBuffer commands, VkRenderPass pass, VkFramebuffer framebuffer, VkExtent2D extent,
              VkPipeline pipeline, VkDescriptorSet set, const Params &params);
     [[nodiscard]] std::uint32_t memory_type(std::uint32_t bits, VkMemoryPropertyFlags flags) const;
@@ -156,6 +192,7 @@ private:
     VkPipeline down_pipeline_{};
     VkPipeline up_pipeline_{};
     VkPipeline composite_pipeline_{};
+    VkPipeline rays_pipeline_{};
 
     // Bloom from a quarter of the target's size down, in three levels.
     static constexpr int kBloomLevels = 3;
@@ -164,6 +201,7 @@ private:
     Image distances_;
     Image visibility_a_;
     Image visibility_b_;
+    Image rays_;  // a quarter of the target: light shafts
     std::array<Image, kBloomLevels> down_{};
     std::array<Image, kBloomLevels> up_{};
     VkDescriptorPool pool_{};
@@ -173,7 +211,29 @@ private:
     std::array<VkDescriptorSet, kBloomLevels> down_sets_{};
     std::array<VkDescriptorSet, kBloomLevels> up_sets_{};
     VkDescriptorSet composite_set_{};
+    VkDescriptorSet rays_set_{};
     std::map<VkImageView, VkFramebuffer> target_framebuffers_;
+
+    // The sun's shadow map, made once, and what it was drawn with.
+    static constexpr std::uint32_t kShadowSize = 2048u;
+    Image shadow_;
+    VkRenderPass shadow_pass_{};
+    VkPipeline shadow_pipeline_{};
+    VkSampler shadow_sampler_{};
+    bool shadow_primed_{};
+    bool shadow_drawn_{};                   // for the scene being recorded
+    bool shadow_this_frame_{};              // begin/end_shadows since the last record()
+    std::array<float, 16> shadow_world_to_clip_{};
+    float shadow_texel_world_{};            // world units per shadow map texel
+    // The sun's block for the passes (binding 6): a ring of slots, one per
+    // record(), so a frame in flight keeps reading its own.
+    static constexpr std::uint32_t kSunSlots = 16u;
+    VkBuffer sun_buffer_{};
+    VkDeviceMemory sun_memory_{};
+    void *sun_mapped_{};
+    VkDeviceSize sun_stride_{256u};
+    std::uint32_t sun_next_{};
+    std::uint32_t sun_offset_{};
 
     // Timestamps around each record(), read back a lap of the ring later.
     static constexpr std::uint32_t kTimerSlots = 32u;
@@ -191,7 +251,11 @@ private:
 // Options with MHP3RD_EFFECTS_OPTIONS applied: `name=value` pairs separated
 // by commas (ao, radius, shadows, bloom, threshold, knee, cap, sharpen,
 // exposure, contrast, saturation, vibrance, vignette, split, shoulder,
-// highlight, gloss, rim, wrap, ground, knee, aa).
+// highlight, gloss, rim, wrap, ground, knee, aa, sun, shade, elevation,
+// azimuth, range, debug).
 [[nodiscard]] Options options_from_environment(Options options);
+// The same from `name=value` pairs separated by commas, semicolons, spaces
+// or lines (for MHP3RD_EFFECTS_LIVE, a file read again when it changes).
+[[nodiscard]] Options options_from_text(Options options, const std::string &text);
 
 } // namespace mhp3rd::gpu::post

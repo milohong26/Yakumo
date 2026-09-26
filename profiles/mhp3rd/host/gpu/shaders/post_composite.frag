@@ -1,6 +1,7 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 #include "post_common.glsl"
+#include "post_sun.glsl"
 
 // The finished 3D scene with everything applied, written back into the
 // game's framebuffer before its interface is drawn over it.
@@ -19,12 +20,13 @@
 //        blends away (0: off)
 //   p.light: x the GE fog's end, y its scale, z 1 when the scene is fogged,
 //            w what MHP3RD_EFFECTS_DEBUG shows instead (1 occlusion,
-//            2 contact shadows, 3 distance, 4 bloom)
+//            2 sunlight and shadows, 3 distance, 4 bloom)
 layout(set = 0, binding = 0) uniform sampler2D scene;
 layout(set = 0, binding = 1) uniform sampler2D depth_buffer;
 layout(set = 0, binding = 2) uniform sampler2D distances;  // half resolution
 layout(set = 0, binding = 3) uniform sampler2D visibility; // half resolution: ambient, light
 layout(set = 0, binding = 4) uniform sampler2D bloom;      // half resolution, expanded linear light
+layout(set = 0, binding = 7) uniform sampler2D rays;       // quarter resolution: light shafts
 layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 out_color;
 
@@ -209,20 +211,40 @@ void main() {
         return;
     }
 
+    // The game's own fog covers what is far away; occlusion fades with it.
+    float clear = 1.0;
+    vec2 vis = vec2(1.0);
     if (!sky) {
-        // The game's own fog covers what is far away; occlusion fades with it.
-        float clear = p.light.z > 0.5 ? clamp((p.light.x - dist) * p.light.y, 0.0, 1.0) : 1.0;
-        vec2 vis = upsampled_visibility(dist);
+        clear = p.light.z > 0.5 ? clamp((p.light.x - dist) * p.light.y, 0.0, 1.0) : 1.0;
+        vis = upsampled_visibility(dist);
         vec3 occluded = multi_bounce(vis.x, clamp(color * 1.3, 0.0, 1.0));
         color *= mix(vec3(1.0), occluded, p.a.x * clear);
-        color *= mix(1.0, 1.0 - p.a.y, (1.0 - vis.y) * clear);
+        if (sun.params.z <= 0.5) color *= mix(1.0, 1.0 - p.a.y, (1.0 - vis.y) * clear);
     }
 
     // Expand, add light, map back.
     float k = p.c.z;
     float peak = max(color.r, max(color.g, color.b));
     color = scale_peak(color, expand(min(peak, 0.999), k)) * p.b.x;
+    if (!sky && sun.params.z > 0.5) {
+        // Sunlight over the game's own lighting, as light added before the
+        // shoulder: lit surfaces take on more light of the sun's colour,
+        // shadowed ones fall towards the cooler light of the sky. Beyond the
+        // shadow map it fades out, and the sky's dome and the far hills keep
+        // the game's own light.
+        float near = 1.0 - smoothstep(sun.params.w * 1.1, sun.params.w * 2.2, dist);
+        vec3 lit = vec3(1.0) + sun.color.rgb * sun.color.w;
+        vec3 shaded = sun.shade.rgb * sun.shade.w;
+        color *= mix(vec3(1.0), mix(shaded, lit, vis.y), clear * near);
+    }
     color += texture(bloom, uv).rgb * p.a.z;
+    if (sun.rays.x > 0.0 && sun.direction.w > 0.5) {
+        // Four bilinear taps around the pixel smooth the march's dither.
+        vec2 t = 0.75 / vec2(textureSize(rays, 0));
+        float shafts = 0.25 * (texture(rays, uv + vec2(-t.x, -t.y)).r + texture(rays, uv + vec2(t.x, -t.y)).r +
+                               texture(rays, uv + vec2(-t.x, t.y)).r + texture(rays, uv + vec2(t.x, t.y)).r);
+        color += sun.color.rgb * (shafts * sun.rays.x);
+    }
     color = grade(max(color, vec3(0.0)));
     peak = max(color.r, max(color.g, color.b));
     color = scale_peak(max(color, vec3(0.0)), shoulder(peak, k));

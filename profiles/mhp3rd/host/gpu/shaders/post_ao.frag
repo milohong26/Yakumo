@@ -1,10 +1,12 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 #include "post_common.glsl"
+#include "post_sun.glsl"
 
 // Ground-truth ambient occlusion (Jimenez et al. 2016, as Intel's XeGTAO
-// formulates it) and screen-space contact shadows towards the key light, at
-// half resolution from the half-resolution view distances.
+// formulates it) and the sun's light on each surface: its shadow map,
+// filtered, times how the surface faces it, refined by screen-space contact
+// shadows. At half resolution from the half-resolution view distances.
 //
 //   p.a: x radius (view units), y falloff (fraction of the radius), z the
 //        target pixels a view unit covers at distance 1, w frame noise offset
@@ -12,7 +14,7 @@
 //        z steps, w shadow fade distance (view units)
 layout(set = 0, binding = 0) uniform sampler2D distances;
 layout(location = 0) in vec2 uv;
-layout(location = 0) out vec2 out_visibility;  // x ambient, y light
+layout(location = 0) out vec2 out_visibility;  // x ambient, y sunlight
 
 const float kPi = 3.14159265;
 const int kSlices = 2;
@@ -40,6 +42,34 @@ vec3 normal_at(ivec2 texel, vec3 centre, float dist) {
     vec3 n = normalize(cross(dy, dx));
     // Towards the viewer.
     return dot(n, -centre) < 0.0 ? -n : n;
+}
+
+// Poisson disc taps for the shadow filter, turned by the pixel's noise.
+const vec2 kDisc[8] = vec2[](vec2(-0.613, 0.617), vec2(0.170, -0.040), vec2(-0.299, -0.792), vec2(0.645, 0.493),
+                             vec2(-0.651, -0.271), vec2(0.421, -0.653), vec2(-0.017, 0.957), vec2(0.901, -0.174));
+
+// How much sun reaches a surface: the shadow map, eight taps around the
+// point (each a hardware 2x2 comparison), with the point pushed out along
+// its normal by a texel and a half so a surface does not shadow itself; the
+// shadow fades out towards the edge of the map, where the sun still lights
+// what faces it.
+float sunlight(vec3 position, vec3 normal, float noise) {
+    vec3 l = sun.direction.xyz;
+    float facing = clamp(dot(normal, l) * 3.0 + 0.15, 0.0, 1.0);
+    if (sun.direction.w < 0.5 || facing <= 0.0) return facing;
+    vec3 offset = normal * (sun.params.y * 1.5) + l * (sun.params.y * 0.5);
+    vec4 s = sun.view_to_shadow * vec4(position + offset, 1.0);
+    vec2 edge = abs(s.xy * 2.0 - 1.0);
+    float inside = 1.0 - smoothstep(0.8, 0.98, max(edge.x, edge.y));
+    if (inside <= 0.0 || s.z >= 1.0) return facing;
+    float angle = noise * 6.2831853;
+    mat2 turn = mat2(cos(angle), sin(angle), -sin(angle), cos(angle));
+    float radius = sun.params.x * 1.75;
+    float lit = 0.0;
+    for (int i = 0; i < 8; ++i)
+        lit += texture(shadow_map, vec3(s.xy + turn * kDisc[i] * radius, s.z - sun.params.x * 0.5));
+    lit *= 0.125;
+    return facing * mix(1.0, lit, inside);
 }
 
 float fast_acos(float x) {
@@ -116,9 +146,9 @@ void main() {
     }
     visibility = pow(clamp(visibility / float(kSlices), 0.0, 1.0), 2.2);
 
+    float light = sun.params.z > 0.5 ? sunlight(centre, normal, noise2) : 1.0;
     // Contact shadow: march towards the light and look for something in front
     // of the ray within a thickness, fading with distance from the camera.
-    float light = 1.0;
     vec3 to_light = p.light.xyz;
     int steps = int(p.b.z);
     if (p.light.w > 0.0 && steps > 0 && dist < p.b.w) {
@@ -139,7 +169,7 @@ void main() {
                 }
             }
             float fade = clamp((p.b.w - dist) / (p.b.w * 0.25), 0.0, 1.0);
-            light = 1.0 - occlusion * fade;
+            light *= 1.0 - occlusion * fade;
         }
     }
     out_visibility = vec2(visibility, light);

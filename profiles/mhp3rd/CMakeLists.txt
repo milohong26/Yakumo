@@ -87,7 +87,10 @@ if(MHP3RD_RENDERER)
             "kPostBlurShader=${MHP3RD_POST_SHADER_DIR}/post_blur.frag"
             "kPostBloomDownShader=${MHP3RD_POST_SHADER_DIR}/post_bloom_down.frag"
             "kPostBloomUpShader=${MHP3RD_POST_SHADER_DIR}/post_bloom_up.frag"
-            "kPostCompositeShader=${MHP3RD_POST_SHADER_DIR}/post_composite.frag")
+            "kPostCompositeShader=${MHP3RD_POST_SHADER_DIR}/post_composite.frag"
+            "kPostRaysShader=${MHP3RD_POST_SHADER_DIR}/post_rays.frag"
+            "kShadowVertexShader=${MHP3RD_POST_SHADER_DIR}/shadow.vert"
+            "kShadowFragmentShader=${MHP3RD_POST_SHADER_DIR}/shadow.frag")
         set(MHP3RD_POST_SHADER_SOURCES ${MHP3RD_POST_SHADERS})
         list(TRANSFORM MHP3RD_POST_SHADER_SOURCES REPLACE "^[A-Za-z]+=" "")
         add_custom_command(
@@ -96,6 +99,7 @@ if(MHP3RD_RENDERER)
             COMMAND python3 "${MHP3RD_PROFILE_DIR}/tools/embed_shaders.py" "${MHP3RD_GLSLANG}"
                     "${MHP3RD_POST_SHADER_INC}" ${MHP3RD_POST_SHADERS}
             DEPENDS ${MHP3RD_POST_SHADER_SOURCES} "${MHP3RD_POST_SHADER_DIR}/post_common.glsl"
+                    "${MHP3RD_POST_SHADER_DIR}/post_sun.glsl"
                     "${MHP3RD_PROFILE_DIR}/tools/embed_shaders.py"
             COMMENT "Compiling the post-processing shaders to SPIR-V")
         add_custom_target(mhp3rd_shaders DEPENDS "${MHP3RD_SHADER_INC}" "${MHP3RD_POST_SHADER_INC}")

@@ -1066,6 +1066,46 @@ struct VulkanRenderer::Impl {
     std::uint32_t scene_target{};  // ...the framebuffer
     int scene_first{};             // what the frame drew there first: 0 nothing yet, 1 3D, 2 2D
     bool effects_applied{};
+    // MHP3RD_TRACE_EFFECTS: the frame's 2D draws into the shown framebuffer
+    // before its first 3D one (bounds in PSP pixels), and how many 3D draws
+    // came before the first narrow 2D one, for the line saying why a frame
+    // got no effects.
+    std::array<float, 4> before_scene{1e9f, 1e9f, -1e9f, -1e9f};
+    std::uint32_t before_scene_draws{};
+    std::uint32_t skipped_frames{};
+    // The scene's draws that cast the sun's shadows, as the frame draws
+    // them: consecutive draws of one group with one matrix and texture are
+    // one entry, drawn again into the shadow map before the effects.
+    struct ShadowCaster {
+        std::array<float, 16> world{};
+        VkBuffer index_buffer{};     // null: vertices without indices
+        VkDeviceSize vertex_base{};
+        VkDeviceSize index_base{};
+        std::uint32_t count{};       // indices, or vertices without them
+        VkDescriptorSet texture{};
+        std::array<float, 4> uv_transform{};
+        float cutoff{-1.0f};         // alpha below this is cut out; negative: not cut
+        bool textured{};
+    };
+    std::vector<ShadowCaster> shadow_casters;
+    bool shadow_frame{};  // this frame's casters are being kept
+    std::uint32_t shadow_skipped_sky{};
+    // MHP3RD_TRACE_EFFECTS: the lights of the frame's first lit scene draw,
+    // to tell a sun fixed in the world from lights that follow the camera.
+    LightingState scene_lights{};
+    std::array<float, 16> scene_lights_view{};
+    bool scene_lights_known{};
+    // The game's sun: the brightest directional light of the scene's lit
+    // draws that is above the horizon and not the light the game keeps on
+    // the camera's axis. Kept from frame to frame.
+    std::array<float, 3> game_sun{};
+    bool game_sun_known{};
+    void note_shadow_caster(const DrawCall &call, VkDescriptorSet texture, const std::array<float, 4> &uv_transform,
+                            VkBuffer index_buffer, VkDeviceSize vertex_base, VkDeviceSize index_base,
+                            std::uint32_t count);
+    void draw_shadows(const post::Camera &camera);
+    bool dump_frame{};         // MHP3RD_EFFECTS_DUMP names a file whose appearance dumps the next frame's draws
+    std::uint32_t dump_index{};
     void note_scene_draw(const DrawCall &call, const VkViewport &viewport);
     [[nodiscard]] post::Camera scene_camera() const;
     void apply_effects(std::uint32_t address);
@@ -2432,6 +2472,12 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
     if (!check(vkCreatePipelineLayout(impl.device, &pipeline_layout_info, nullptr, &impl.pipeline_layout),
                "vkCreatePipelineLayout", error))
         return false;
+    if (impl.effects_ready) {
+        std::string shadow_error;
+        if (!impl.fx().make_shadow_pipeline(impl.pipeline_layout, sizeof(GpuVertex), offsetof(GpuVertex, x),
+                                            offsetof(GpuVertex, u), shadow_error))
+            std::cout << "[render] sun shadows unavailable: " << shadow_error << "\n";
+    }
 
     VkSamplerCreateInfo sampler_info{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
     sampler_info.magFilter = VK_FILTER_LINEAR;
@@ -3389,6 +3435,10 @@ void VulkanRenderer::Impl::reset_scene() {
     scene_target = 0u;
     scene_first = 0;
     effects_applied = false;
+    before_scene = {1e9f, 1e9f, -1e9f, -1e9f};
+    before_scene_draws = 0u;
+    shadow_casters.clear();
+    scene_lights_known = false;
 }
 
 // A 3D draw into a shown framebuffer: the camera it was drawn with, counted
@@ -3404,7 +3454,8 @@ void VulkanRenderer::Impl::note_scene_draw(const DrawCall &call, const VkViewpor
     for (SceneCamera &candidate : scene_cameras) {
         const post::Camera &c = candidate.camera;
         if (candidate.draws != 0u && c.projection[0] == m[0] && c.projection[5] == m[5] &&
-            c.projection[10] == m[10] && c.projection[14] == m[14] && c.viewport_width == viewport.width &&
+            c.projection[10] == m[10] && c.projection[14] == m[14] && c.view == call.view &&
+            c.viewport_width == viewport.width &&
             c.viewport_height == viewport.height && c.viewport_x == viewport.x && c.viewport_y == viewport.y &&
             c.depth_min == viewport.minDepth && c.depth_max == viewport.maxDepth) {
             slot = &candidate;
@@ -3418,6 +3469,7 @@ void VulkanRenderer::Impl::note_scene_draw(const DrawCall &call, const VkViewpor
         post::Camera &c = slot->camera;
         c.valid = true;
         c.projection = m;
+        c.view = call.view;
         c.viewport_x = viewport.x;
         c.viewport_y = viewport.y;
         c.viewport_width = viewport.width;
@@ -3426,6 +3478,30 @@ void VulkanRenderer::Impl::note_scene_draw(const DrawCall &call, const VkViewpor
         c.depth_max = viewport.maxDepth;
     }
     ++slot->draws;
+    if (call.lighting_enabled && !scene_lights_known) {
+        scene_lights = call.lighting;
+        scene_lights_view = call.view;
+        scene_lights_known = true;
+        const std::array<float, 3> forward{-call.view[2], -call.view[6], -call.view[10]};
+        float best = 0.0f;
+        for (const LightState &light : call.lighting.lights) {
+            if (!light.enabled || light.type != 0u) continue;
+            const std::array<float, 3> &d = light.position;
+            const float length = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+            if (length < 1e-6f) continue;
+            const std::array<float, 3> n{d[0] / length, d[1] / length, d[2] / length};
+            // The camera's own light points back along its view.
+            if (-(n[0] * forward[0] + n[1] * forward[1] + n[2] * forward[2]) > 0.97f || n[1] < 0.15f) continue;
+            const float brightness = static_cast<float>(light.diffuse & 0xFFu) +
+                                     static_cast<float>((light.diffuse >> 8u) & 0xFFu) +
+                                     static_cast<float>((light.diffuse >> 16u) & 0xFFu);
+            if (brightness > best) {
+                best = brightness;
+                game_sun = n;
+                game_sun_known = true;
+            }
+        }
+    }
     post::Camera &c = slot->camera;
     if (call.fog.enabled && !c.fog) {
         c.fog = true;
@@ -3458,7 +3534,11 @@ void VulkanRenderer::Impl::note_scene_draw(const DrawCall &call, const VkViewpor
 post::Camera VulkanRenderer::Impl::scene_camera() const {
     const auto best = std::max_element(scene_cameras.begin(), scene_cameras.end(),
                                        [](const SceneCamera &a, const SceneCamera &b) { return a.draws < b.draws; });
-    return best->draws != 0u ? best->camera : post::Camera{};
+    if (best->draws == 0u) return post::Camera{};
+    post::Camera camera = best->camera;
+    camera.sun = game_sun;
+    camera.sun_known = game_sun_known;
+    return camera;
 }
 
 void VulkanRenderer::Impl::apply_effects(std::uint32_t address) {
@@ -3483,10 +3563,134 @@ void VulkanRenderer::Impl::apply_effects(std::uint32_t address) {
         recording_frame.effects_camera = camera;
     }
     Target &target = found->second;
+    if (shadow_frame) draw_shadows(camera);
     fx().record(command_buffer, target.color, target.color_view, target.depth, depth_aspect(), camera,
                 effect_options);
+    // The effects bound pipelines and sets of their own.
+    forget_bindings();
     // The picture changed: a copy made for sampling it is out of date.
     target.draw_serial = ++target_draw_counter;
+}
+
+// A draw's vertices as a sphere in the world: the centre of their box and
+// the distance to its corners, through the world matrix (its largest scale).
+struct WorldSphere {
+    std::array<float, 3> centre{};
+    float radius{};
+    bool known{};
+};
+WorldSphere world_sphere(const DrawCall &call) {
+    WorldSphere sphere{};
+    if (call.vertices.empty()) return sphere;
+    std::array<float, 3> lo{1e30f, 1e30f, 1e30f}, hi{-1e30f, -1e30f, -1e30f};
+    for (const Vertex &vertex : call.vertices)
+        for (int axis = 0; axis < 3; ++axis) {
+            lo[axis] = std::min(lo[axis], vertex.position[axis]);
+            hi[axis] = std::max(hi[axis], vertex.position[axis]);
+        }
+    const std::array<float, 16> &w = call.world;
+    const std::array<float, 3> mid{(lo[0] + hi[0]) * 0.5f, (lo[1] + hi[1]) * 0.5f, (lo[2] + hi[2]) * 0.5f};
+    for (int row = 0; row < 3; ++row)
+        sphere.centre[row] = w[row] * mid[0] + w[4 + row] * mid[1] + w[8 + row] * mid[2] + w[12 + row];
+    float scale = 0.0f;
+    for (int column = 0; column < 3; ++column)
+        scale = std::max(scale, std::sqrt(w[column * 4] * w[column * 4] + w[column * 4 + 1] * w[column * 4 + 1] +
+                                          w[column * 4 + 2] * w[column * 4 + 2]));
+    const float dx = hi[0] - mid[0], dy = hi[1] - mid[1], dz = hi[2] - mid[2];
+    sphere.radius = std::sqrt(dx * dx + dy * dy + dz * dz) * scale;
+    sphere.known = true;
+    return sphere;
+}
+
+// A draw of the scene that casts the sun's shadows: solid (or cut out by
+// alpha) and in the scene's depth, drawn before the interface.
+void VulkanRenderer::Impl::note_shadow_caster(const DrawCall &call, VkDescriptorSet texture,
+                                              const std::array<float, 4> &uv_transform, VkBuffer index_buffer,
+                                              VkDeviceSize vertex_base, VkDeviceSize index_base, std::uint32_t count) {
+    constexpr std::size_t kMaxCasters = 16384u;
+    if (!shadow_frame || effects_applied || call.through || call.clear_mode || count == 0u ||
+        !shows(call.target.color_address) || !call.depth.write_enabled || !call.depth.test_enabled ||
+        interpolation::is_orthographic(call.projection) || shadow_casters.size() >= kMaxCasters)
+        return;
+    // Additive glows and other blends cast nothing; alpha-blended solids do.
+    if (call.blend.enabled && call.blend.destination_factor != 3u) return;
+    // Nor does the sky: a dome (or box) around the camera, far larger than
+    // anything that casts a shadow, would shadow the whole scene.
+    const WorldSphere sphere = world_sphere(call);
+    if (sphere.known && sphere.radius > 3000.0f) {
+        const std::array<float, 3> eye = camera_position(call.view);
+        const float dx = sphere.centre[0] - eye[0], dy = sphere.centre[1] - eye[1], dz = sphere.centre[2] - eye[2];
+        if (std::sqrt(dx * dx + dy * dy + dz * dz) < sphere.radius * 0.6f || sphere.radius > 40000.0f) {
+            ++shadow_skipped_sky;
+            return;
+        }
+    }
+    float cutoff = -1.0f;
+    if (call.alpha_test.enabled && (call.alpha_test.function == 6u || call.alpha_test.function == 7u))
+        cutoff = static_cast<float>(call.alpha_test.reference) / 255.0f;
+    if (call.blend.enabled) cutoff = std::max(cutoff, 0.5f);
+    const bool textured = call.texture.enabled;
+    if (!shadow_casters.empty()) {
+        ShadowCaster &last = shadow_casters.back();
+        const bool indexed = index_buffer != VK_NULL_HANDLE;
+        const VkDeviceSize expected = indexed ? last.index_base + last.count * sizeof(std::uint16_t)
+                                              : last.vertex_base + last.count * sizeof(GpuVertex);
+        if (last.index_buffer == index_buffer && (!indexed || last.vertex_base == vertex_base) &&
+            expected == (indexed ? index_base : vertex_base) && last.world == call.world && last.texture == texture &&
+            last.cutoff == cutoff && last.textured == textured && last.uv_transform == uv_transform) {
+            last.count += count;
+            return;
+        }
+    }
+    ShadowCaster caster{};
+    caster.world = call.world;
+    caster.index_buffer = index_buffer;
+    caster.vertex_base = vertex_base;
+    caster.index_base = index_base;
+    caster.count = count;
+    caster.texture = texture;
+    caster.uv_transform = uv_transform;
+    caster.cutoff = cutoff;
+    caster.textured = textured;
+    shadow_casters.push_back(caster);
+}
+
+// The scene's casters, drawn again from the sun into the shadow map.
+void VulkanRenderer::Impl::draw_shadows(const post::Camera &camera) {
+    if (shadow_casters.empty() || !camera.valid) return;
+    std::array<float, 16> world_to_clip{};
+    if (!fx().begin_shadows(command_buffer, camera, effect_options, world_to_clip)) return;
+    VkDescriptorSet bound_texture = VK_NULL_HANDLE;
+    VkDeviceSize bound_vertices = ~VkDeviceSize{0};
+    PushConstants push{};
+    for (const ShadowCaster &caster : shadow_casters) {
+        const bool cut = caster.textured && caster.cutoff >= 0.0f;
+        if (caster.texture != bound_texture && caster.texture != VK_NULL_HANDLE) {
+            vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout, 0u, 1u,
+                                    &caster.texture, 0u, nullptr);
+            bound_texture = caster.texture;
+        }
+        push.transform = multiply(world_to_clip, caster.world);
+        push.texture_params = {caster.textured ? 1.0f : 0.0f, 0.0f, std::max(caster.cutoff, 0.0f), cut ? 1.0f : 0.0f};
+        push.uv_transform = caster.uv_transform;
+        vkCmdPushConstants(command_buffer, pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0u, sizeof(push), &push);
+        if (caster.vertex_base != bound_vertices) {
+            vkCmdBindVertexBuffers(command_buffer, 0u, 1u, &vertex_buffer, &caster.vertex_base);
+            bound_vertices = caster.vertex_base;
+        }
+        if (caster.index_buffer != VK_NULL_HANDLE) {
+            // Metal wants index buffer offsets on 4 bytes.
+            const VkDeviceSize aligned = caster.index_base & ~VkDeviceSize{3u};
+            vkCmdBindIndexBuffer(command_buffer, caster.index_buffer, aligned, VK_INDEX_TYPE_UINT16);
+            vkCmdDrawIndexed(command_buffer, caster.count, 1u,
+                             static_cast<std::uint32_t>((caster.index_base - aligned) / sizeof(std::uint16_t)), 0, 0u);
+        } else {
+            vkCmdDraw(command_buffer, caster.count, 1u, 0u, 0u);
+        }
+    }
+    fx().end_shadows(command_buffer);
+    forget_bindings();
 }
 
 void VulkanRenderer::Impl::destroy_target(Target &target) {
@@ -5481,13 +5685,42 @@ void VulkanRenderer::begin_frame() {
     impl.reset_scene();
     impl.effects_frame = impl.effects_ready && settings::current().effects;
     impl.per_pixel_frame = settings::current().lighting;
+    if (const char *dump = std::getenv("MHP3RD_EFFECTS_DUMP"); dump != nullptr && std::remove(dump) == 0) {
+        impl.dump_frame = true;
+        impl.dump_index = 0u;
+        std::printf("[dump] frame begins\n");
+    } else if (impl.dump_frame) {
+        impl.dump_frame = false;
+    }
     static const int effects_debug = [] {
         const char *text = std::getenv("MHP3RD_EFFECTS_DEBUG");
         return text != nullptr ? std::atoi(text) : 0;
     }();
-    static const post::Options effects_options = post::options_from_environment(post::Options{});
+    static post::Options effects_options = [] {
+        post::Options options = post::options_from_environment(post::Options{});
+        options.debug = effects_debug;
+        return options;
+    }();
+    // MHP3RD_EFFECTS_LIVE: a file of options read again whenever it changes,
+    // over those of MHP3RD_EFFECTS_OPTIONS, for tuning while playing.
+    static const char *live_path = std::getenv("MHP3RD_EFFECTS_LIVE");
+    if (live_path != nullptr && impl.frames % 20u == 0u) {
+        static std::filesystem::file_time_type seen{};
+        std::error_code error;
+        const auto written = std::filesystem::last_write_time(live_path, error);
+        if (!error && written != seen) {
+            seen = written;
+            std::ifstream file(live_path);
+            const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+            post::Options options = post::options_from_environment(post::Options{});
+            options.debug = effects_debug;
+            effects_options = post::options_from_text(options, text);
+            std::cout << "[effects] options from " << live_path << ": " << text << "\n" << std::flush;
+        }
+    }
     impl.effect_options = effects_options;
-    impl.effect_options.debug = effects_debug;
+    impl.shadow_frame = impl.effects_frame && impl.fx().shadow_pipeline() != VK_NULL_HANDLE &&
+                        impl.effect_options.sun > 0.0f;
 }
 
 void VulkanRenderer::upload_frame(std::uint32_t display_address, const std::uint8_t *pixels, std::uint32_t width,
@@ -6269,14 +6502,23 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     }
 
     // The interface begins: the scene under it gets the lighting effects
-    // first. Fades and backdrops as wide as the screen belong to the scene.
+    // first. Fades and backdrops as wide as the screen belong to the scene,
+    // and so do 2D draws tested against its depth (the marks over the heads
+    // of people to talk to).
     if (impl.effects_frame && !impl.effects_applied && !call.clear_mode && call.through &&
         impl.shows(call.target.color_address)) {
-        if (impl.scene_first == 0) {
+        if (impl.scene_first == 0 || (impl.scene_first == 2 && impl.scene_draws == 0u)) {
             impl.scene_first = 2;
+            ++impl.before_scene_draws;
+            for (const Vertex &vertex : call.vertices) {
+                impl.before_scene[0] = std::min(impl.before_scene[0], vertex.position[0]);
+                impl.before_scene[1] = std::min(impl.before_scene[1], vertex.position[1]);
+                impl.before_scene[2] = std::max(impl.before_scene[2], vertex.position[0]);
+                impl.before_scene[3] = std::max(impl.before_scene[3], vertex.position[1]);
+            }
         } else if (impl.scene_first == 1 && impl.scene_draws >= kEffectsSceneDraws &&
                    call.target.color_address == impl.scene_target && framebuffer_source.target == nullptr &&
-                   !call.vertices.empty()) {
+                   !call.vertices.empty() && !call.depth.test_enabled) {
             float left = call.vertices.front().position[0], right = left;
             for (const Vertex &vertex : call.vertices) {
                 left = std::min(left, vertex.position[0]);
@@ -6284,6 +6526,34 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
             }
             if (right - left < kScreenWideDraw) impl.apply_effects(call.target.color_address);
         }
+    }
+    if (impl.dump_frame) {
+        float l = 1e9f, t = 1e9f, r = -1e9f, b = -1e9f;
+        for (const Vertex &vertex : call.vertices) {
+            l = std::min(l, vertex.position[0]);
+            t = std::min(t, vertex.position[1]);
+            r = std::max(r, vertex.position[0]);
+            b = std::max(b, vertex.position[1]);
+        }
+        const WorldSphere sphere = world_sphere(call);
+        const std::array<float, 3> eye = camera_position(call.view);
+        const float ex = sphere.centre[0] - eye[0], ey = sphere.centre[1] - eye[1], ez = sphere.centre[2] - eye[2];
+        std::printf("[dump] %4u %s target 0x%08X%s verts %zu %s tex %s 0x%08X%s blend %s %u/%u depth %s%s ortho %d "
+                    "fog %d r %.0f d %.0f %s%s\n",
+                    impl.dump_index++, call.clear_mode ? "CLEAR" : call.through ? "2D   " : "3D   ",
+                    call.target.color_address, impl.shows(call.target.color_address) ? " shown" : "      ",
+                    call.vertices.size(),
+                    call.through ? (std::to_string(static_cast<int>(l)) + "," + std::to_string(static_cast<int>(t)) +
+                                    "-" + std::to_string(static_cast<int>(r)) + "," + std::to_string(static_cast<int>(b)))
+                                       .c_str()
+                                 : "",
+                    call.texture.enabled ? "on" : "off", call.texture.address,
+                    framebuffer_source.target != nullptr ? " (framebuffer)" : "", call.blend.enabled ? "on" : "off",
+                    call.blend.source_factor, call.blend.destination_factor, call.depth.test_enabled ? "test" : "-",
+                    call.depth.write_enabled ? "+write" : "", interpolation::is_orthographic(call.projection) ? 1 : 0,
+                    call.fog.enabled ? 1 : 0, static_cast<double>(sphere.radius),
+                    static_cast<double>(std::sqrt(ex * ex + ey * ey + ez * ez)), impl.effects_applied ? "fx-done" : "",
+                    "");
     }
 
     if (!impl.pass_active || impl.current_target != call.target.color_address) {
@@ -6405,6 +6675,9 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
                 vkCmdDraw(impl.command_buffer, draw_count, 1u, 0u, 0u);
             }
             perf::count_recorded_draws(1u);
+            if (!raw)
+                impl.note_shadow_caster(call, texture_descriptor, push.uv_transform, VK_NULL_HANDLE, vertex_start, 0u,
+                                        draw_count);
             impl.record_draw_for_replay(call, lit, skinned_first, state, vertex_start, VK_NULL_HANDLE, 0u,
                                         draw_count, drawn_vertices, false);
         } else {
@@ -6441,6 +6714,9 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
                 for (std::uint16_t &index : impl.direct_indices) index = static_cast<std::uint16_t>(index + rebase);
                 std::memcpy(indices, impl.direct_indices.data(), impl.direct_indices.size() * sizeof(std::uint16_t));
             }
+            if (!raw)
+                impl.note_shadow_caster(call, texture_descriptor, push.uv_transform, impl.index_buffer,
+                                        group.vertex_base, impl.index_offset, draw_count);
             impl.index_offset += impl.direct_indices.size() * sizeof(std::uint16_t);
             group.vertex_end = draw_end;
             group.index_count += draw_count;
@@ -6480,6 +6756,9 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     } else {
         vkCmdDraw(impl.command_buffer, draw_count, 1u, 0u, 0u);
     }
+    if (!raw)
+        impl.note_shadow_caster(call, texture_descriptor, push.uv_transform, direct ? impl.vertex_buffer : VK_NULL_HANDLE,
+                                vertex_start, index_start, draw_count);
     if (impl.interpolating) {
         const Impl::DrawState state{pipeline, texture_descriptor, lighting_offsets, vk_viewport, vk_scissor,
                                     blend_constants, push};
@@ -7472,8 +7751,34 @@ bool VulkanRenderer::present(std::uint32_t display_address,
     if (impl.effects_frame && !impl.effects_applied && impl.scene_first == 1 &&
         impl.scene_draws >= kEffectsSceneDraws && impl.scene_target == display_address)
         impl.apply_effects(display_address);
-    // MHP3RD_TRACE_EFFECTS=1: what the effects cost, once a second.
+    // MHP3RD_TRACE_EFFECTS=1: what the effects cost, once a second, and why
+    // frames got none.
     static const bool trace_effects = std::getenv("MHP3RD_TRACE_EFFECTS") != nullptr;
+    if (trace_effects && impl.effects_frame && !impl.effects_applied && impl.skipped_frames++ % 30u == 0u) {
+        const post::Camera camera = impl.scene_camera();
+        std::printf("[effects] frame without effects: first drawn %s, %u 3D draws into 0x%08X (shown 0x%08X), "
+                    "camera %s, %u 2D draws before the 3D spanning x %.0f-%.0f y %.0f-%.0f\n",
+                    impl.scene_first == 0 ? "nothing" : impl.scene_first == 1 ? "3D" : "2D", impl.scene_draws,
+                    impl.scene_target, display_address, camera.valid ? "valid" : "none", impl.before_scene_draws,
+                    static_cast<double>(impl.before_scene[0]), static_cast<double>(impl.before_scene[2]),
+                    static_cast<double>(impl.before_scene[1]), static_cast<double>(impl.before_scene[3]));
+    }
+    if (trace_effects && impl.frames % 30u == 0u && impl.shadow_frame) {
+        std::printf("[effects] %zu shadow casters, %u sky draws left out\n", impl.shadow_casters.size(),
+                    impl.shadow_skipped_sky);
+        if (impl.scene_lights_known) {
+            const std::array<float, 3> eye = camera_position(impl.scene_lights_view);
+            const std::array<float, 16> &v = impl.scene_lights_view;
+            std::printf("[effects] camera at %.0f %.0f %.0f looking %.2f %.2f %.2f; lights (world):", eye[0], eye[1],
+                        eye[2], -v[2], -v[6], -v[10]);
+            for (const LightState &light : impl.scene_lights.lights)
+                if (light.enabled && light.type == 0u)
+                    std::printf(" [%.2f %.2f %.2f diffuse %06X]", light.position[0], light.position[1],
+                                light.position[2], light.diffuse);
+            std::printf("\n");
+        }
+    }
+    impl.shadow_skipped_sky = 0u;
     if (trace_effects && impl.frames % 30u == 0u) {
         std::array<double, 6> stages{};
         const double ms = impl.fx().take_gpu_ms(&stages);
