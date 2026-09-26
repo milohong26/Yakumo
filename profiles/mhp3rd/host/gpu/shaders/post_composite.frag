@@ -229,6 +229,16 @@ void main() {
     float k = p.c.z;
     float peak = max(color.r, max(color.g, color.b));
     color = scale_peak(color, expand(min(peak, 0.999), k)) * p.b.x;
+    if (sun.params.z > 0.5 && sun.color.w > 0.0 && sun.rays.x > 0.0) {
+        // The air towards the sun glows: over the sky and what is far, as
+        // the haze the sun lights (forward scattering), wide and faint with
+        // a brighter core. Near things are left to the shafts.
+        vec3 ray = normalize(view_position(gl_FragCoord.xy, 1.0));
+        float towards = max(dot(ray, sun.direction.xyz), 0.0);
+        float far = sky ? 1.0 : smoothstep(sun.params.w * 1.2, sun.params.w * 3.0, dist);
+        float glow = pow(towards, 6.0) * 0.22 + pow(towards, 48.0) * 0.45;
+        color += sun.color.rgb * (glow * far * sun.color.w * sun.rays.x * 5.0);
+    }
     if (!sky && sun.water.w > 0.5) {
         float water = texelFetch(water_mask, ivec2(gl_FragCoord.xy), 0).r;
         if (water > 0.0) {
