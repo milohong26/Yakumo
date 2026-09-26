@@ -308,6 +308,17 @@ void main() {
     // and walls near it as well as glowing.
     if (!sky) color += color * glow * (sun.clouds.w * 4.0);
     color += glow * p.a.z;
+    if (sun.params.z > 0.5 && sun.fog.x > 0.0) {
+        // The game's fog is one flat colour; lit by the sun, it glows
+        // warmer towards it and cooler away from it, as far as it covers the
+        // pixel (and a little over the sky).
+        vec3 ray = normalize(view_position(gl_FragCoord.xy, 1.0));
+        float towards = dot(ray, sun.direction.xyz) * 0.5 + 0.5;
+        towards *= towards;
+        float fogged = sky ? 0.2 : 1.0 - clear;
+        vec3 tint = mix(vec3(0.9, 0.95, 1.06), vec3(1.18, 1.06, 0.92), towards);
+        color *= mix(vec3(1.0), tint, fogged * sun.fog.x * min(sun.color.w, 1.0));
+    }
     if ((sun.rays.x > 0.0 || sun.bounce.y > 0.0) && sun.params.z > 0.5) {
         // Filtered up from a quarter of the resolution, which smooths the
         // march's dither.

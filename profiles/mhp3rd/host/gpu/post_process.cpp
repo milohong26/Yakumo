@@ -120,6 +120,7 @@ struct SunBlock {
     float view_to_world[16];
     float water[4];
     float clouds[4];
+    float fog[4];
     float bounce[4];
 };
 
@@ -832,6 +833,7 @@ void Effects::write_sun(const Camera &camera, const Options &options) {
     block.clouds[1] = std::clamp(options.cloud_cover, 0.0f, 1.0f);
     block.clouds[2] = std::max(options.cloud_size, 100.0f);
     block.clouds[3] = options.light_bleed;
+    block.fog[0] = options.fog_tint;
     block.bounce[0] = options.bounce;
     block.bounce[1] = options.beams;
     block.bounce[2] = options.sun_disc;
@@ -1444,6 +1446,7 @@ Options options_from_text(Options options, const std::string &text) {
         else if (name == "beams") options.beams = value;
         else if (name == "sundisc") options.sun_disc = value;
         else if (name == "leaves") options.translucency = value;
+        else if (name == "fogtint") options.fog_tint = value;
         else if (name == "wind") options.wind = value;
         else if (name == "reach") options.rays_reach = value;
         else if (name == "debug") options.debug = static_cast<int>(value);

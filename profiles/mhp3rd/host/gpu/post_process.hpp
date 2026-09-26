@@ -97,6 +97,7 @@ struct Options {
     float beams{0.3f};  // beams from the bright sky through what stands against it, on the screen
     float sun_disc{1.0f};  // the sun's disc and glare where the sky is bright around it
     float translucency{2.0f};  // leaves glowing with the sun behind them
+    float fog_tint{0.7f};      // the game's fog warmer towards the sun, cooler away
     // Water: reflections of the scene and sky on the game's water surfaces,
     // with moving ripples and the sun's glints. 0 turns them off.
     float water{1.0f};
