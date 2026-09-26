@@ -261,7 +261,15 @@ void main() {
             vec3 n = water_normal(world);
             vec3 v = normalize(-position);
             float fresnel = 0.02 + 0.98 * pow(1.0 - max(dot(n, v), 0.0), 5.0);
-            vec4 found = texture(reflection, uv);
+            // Softened over a few half-resolution texels, more vertically
+            // (ripples stretch reflections up and down), weighted by how
+            // sure each hit is: thin edges do not streak.
+            vec2 t = 1.0 / vec2(textureSize(reflection, 0));
+            vec4 found = texture(reflection, uv) * 2.0;
+            found += texture(reflection, uv + vec2(1.5 * t.x, 0.0)) + texture(reflection, uv - vec2(1.5 * t.x, 0.0));
+            found += texture(reflection, uv + vec2(0.0, 2.5 * t.y)) + texture(reflection, uv - vec2(0.0, 2.5 * t.y));
+            found /= 6.0;
+            found.rgb = found.a > 1e-3 ? found.rgb / found.a : vec3(0.0);
             vec3 sky_light = texelFetch(average, ivec2(0), 0).rgb;
             vec3 mirrored = mix(sky_light * 1.1, found.rgb, found.a);
             float amount = clamp(fresnel * 1.6 + 0.12, 0.0, 1.0) * water * sun.water.x * clear;

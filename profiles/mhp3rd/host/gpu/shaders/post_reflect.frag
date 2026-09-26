@@ -68,6 +68,7 @@ void main() {
             break;
         }
     }
-    vec3 color = hit > 0.0 ? to_linear(textureLod(scene, hit_uv, 0.0).rgb) : vec3(0.0);
+    // Premultiplied by how sure the hit is, for the composite's filter.
+    vec3 color = hit > 0.0 ? to_linear(textureLod(scene, hit_uv, 0.0).rgb) * hit : vec3(0.0);
     out_reflection = vec4(color, hit);
 }
